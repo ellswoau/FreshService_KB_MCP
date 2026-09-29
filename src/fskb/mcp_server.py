@@ -185,6 +185,17 @@ def build_server() -> "FastMCP":
             else settings.aoai_embed_deployment,
         }
 
+    # Credential-free health endpoint(s) for the Docker HEALTHCHECK and
+    # monitors. Registered on the FastMCP app so they exist on the HTTP
+    # transport; the middleware above exempts these paths from bearer auth.
+    async def _health_response(request):  # noqa: ANN001 - Starlette Request
+        from starlette.responses import JSONResponse
+
+        return JSONResponse({"status": "ok", "service": "freshservice-kb"})
+
+    mcp.custom_route("/health", methods=["GET"], name="health")(_health_response)
+    mcp.custom_route("/healthz", methods=["GET"], name="healthz")(_health_response)
+
     return mcp
 
 
@@ -280,12 +291,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     token = os.environ.get("KB_MCP_AUTH_TOKEN", "")
-    middlewares = []
+    # FastMCP 4.x takes a single ``middleware`` kwarg (Starlette Middleware
+    # specs: (class, args, kwargs)); the old ``middlewares`` plural kwarg was
+    # removed, so passing it raised TypeError and crash-looped the daemon.
+    middleware = []
     if token:
-        middlewares.append((_BearerAuthMiddleware, {"allowed_key": token}, {}))
+        middleware.append((_BearerAuthMiddleware, (), {"allowed_key": token}))
     else:  # pragma: no cover
         print("WARNING: KB_MCP_AUTH_TOKEN not set - network transport is unauthenticated", file=sys.stderr)
-    mcp.run(transport=args.transport, host=args.host, port=args.port, middlewares=middlewares)
+    mcp.run(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        middleware=middleware or None,
+    )
     return 0
 
 

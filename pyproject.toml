@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-mcp = ["fastmcp>=2.2.0"]
+mcp = ["fastmcp>=4.0,<5"]
 
 [project.scripts]
 fskb = "fskb.cli:main"

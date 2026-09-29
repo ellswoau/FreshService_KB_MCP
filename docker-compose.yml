@@ -31,11 +31,16 @@ services:
       - ./feedback:/app/feedback:ro
     healthcheck:
       # This service maintains the watermark; its presence proves a run happened.
+      # The FIRST run on a large FreshService tenant hydrates conversations for
+      # every ticket (thousands of sequential API calls = tens of minutes), so a
+      # short retry budget would mark a healthy, still-running container
+      # `unhealthy`. Allow up to ~1h before failing, and give the loop grace to
+      # recover after a crash-loop flap.
       test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if os.path.exists(os.environ.get('STATE_DIR','/data/.state')+'/state.json') else 1)"]
       interval: 60s
       timeout: 10s
-      retries: 3
-      start_period: 30s
+      retries: 60
+      start_period: 60s
 
   mcp:
     build: .
