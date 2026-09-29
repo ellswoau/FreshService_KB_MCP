@@ -42,7 +42,7 @@ services:
     image: freshservice-kb:latest
     container_name: freshservice-kb-mcp
     restart: unless-stopped
-    command: ["fskb-mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8014"]
+    command: ["fskb-mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8015"]
     env_file: .env
     environment:
       # KB_MCP_AUTH_TOKEN comes from .env via env_file above. Do NOT also list it
@@ -51,11 +51,11 @@ services:
       # auth / causes mismatches.
       KB_BOOST_PATH: /app/feedback/boost.json
     ports:
-      - "8014:8014"
+      - "8015:8015"
     volumes:
       - ./feedback:/app/feedback:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8014/health', timeout=6).close()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8015/health', timeout=6).close()"]
       interval: 30s
       timeout: 6s
       retries: 3
