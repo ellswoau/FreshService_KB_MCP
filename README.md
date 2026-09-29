@@ -44,12 +44,26 @@ scripts/run_pipeline.py   scheduler entrypoint (incremental / reconcile / both)
 
 ## Setup
 
+### Local (development)
+
 ```bash
 cd freshservice-kb
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env   # fill in real values
 ```
+
+### Docker (recommended for the scheduler)
+
+```bash
+cp .env.example .env          # fill in real values (never commit)
+docker compose up -d updater  # 4-hourly Azure AI Search updater
+docker compose logs -f updater
+```
+
+The updater writes its watermark to the `fskb-state` volume, so restarts and
+rebuilds do not re-pull history. See **Automation** for the schedule and
+**OpenClaw integration** for wiring the retrieval server into Axle.
 
 ## CLI
 
@@ -197,26 +211,74 @@ One document per ticket, keyed by `ticket_id`. Fields:
 
 ## Automation
 
-`scripts/run_pipeline.py` is the scheduler entrypoint (config from env):
+### Dockerised 4-hourly updater (recommended)
+
+`scripts/scheduler.py` runs an incremental index every `INTERVAL_HOURS`
+(default **4**) and a reconcile once a day. It is a plain loop with no
+cron/systemd dependency, so it runs anywhere:
 
 ```bash
-python scripts/run_pipeline.py --mode incremental   # every 6h
-python scripts/run_pipeline.py --mode reconcile     # nightly
-python scripts/run_pipeline.py --mode both
+docker compose up -d updater          # 4-hourly, restart: unless-stopped
+docker compose logs -f updater        # watch runs
 ```
 
-Run it as an Azure Function (timer), a Container Apps job, or an OpenClaw
-automation. `azure/function_timer/` is a ready timer wrapper.
+Tunables (env / compose):
 
-Recommended cadence:
+| Variable | Default | Meaning |
+|---|---|---|
+| `INTERVAL_HOURS` | `4` | how often to run the incremental index |
+| `RECONCILE_HOUR_UTC` | `3` | daily reconcile hour (UTC); `-1` disables |
+| `RUN_AT_START` | `true` | run immediately on container start |
 
-- **incremental every 6h** — `updated_since=<watermark>` upserts changed tickets.
+A failed run is logged and retried on the next tick — it never kills the loop.
+
+### Direct / other schedulers
+
+```bash
+python scripts/scheduler.py                       # same 4-hourly loop, no Docker
+python scripts/run_pipeline.py --mode incremental # single run (cron/Task Scheduler)
+python scripts/run_pipeline.py --mode both        # incremental + reconcile
+```
+
+Also usable as an Azure Function (timer) or Container Apps job —
+`azure/function_timer/` is a ready wrapper (its default schedule is 6h; change
+the cron in `function.json` to `0 0 */4 * * *` for 4-hourly).
+
+Cadence rationale:
+
+- **incremental every 4h** — `updated_since=<watermark>` upserts changed tickets.
 - **nightly reconcile** — soft-delete ids whose ticket is no longer resolved/closed,
   so stale fixes stop surfacing.
 
 ## Consumption
 
-Point the agent's retrieval tool at `SearchClient.hybrid_search`:
+### Option 1 — retrieval MCP server (recommended for OpenClaw)
+
+`fskb-mcp` exposes the KB as an MCP tool so Axle can call it mid-ticket:
+
+```bash
+pip install -e ".[mcp]"
+fskb-mcp                              # stdio (embedded MCP client)
+fskb-mcp --transport http --port 8100 # network daemon (bearer-gated)
+
+docker compose --profile mcp up -d    # containerised daemon
+```
+
+Tools:
+
+- `search_kb(query, top, category, sub_category, store, app)` — pass the
+  requester's own words as the query (the **symptom**, not the fix). Returns the
+  top prior fixes with resolutions, ages, scores and any IT Glue links.
+- `kb_stats()` — index size and non-secret config.
+
+Behaviour worth knowing: recency-weighted (a fix from last month outranks one
+from last year), `KB_BOOST_PATH` optionally applies the feedback boost table,
+and if no embedding provider is reachable it degrades to BM25-only rather than
+failing (`mode` in the response tells you which path ran).
+
+### Option 2 — call the library directly
+
+Point an agent's retrieval at `SearchClient.hybrid_search`:
 
 1. Build an OData **filter** first (`build_filter`): category/store/app narrows
    candidates before similarity.
@@ -227,6 +289,74 @@ Point the agent's retrieval tool at `SearchClient.hybrid_search`:
    one-off from 2023.
 4. Return top-3 with ticket links, resolution text and IT Glue URLs. Keep a human
    in the loop; never auto-reply from retrieved content.
+
+## OpenClaw integration
+
+Short version: **do not** wire the index into LiteLLM's vector-store search box.
+Use the retrieval **MCP server** — it is the same code path the rest of the
+package uses, so it already knows your field names and hybrid query shape.
+
+### Why not a LiteLLM vector store
+
+LiteLLM's Azure AI vector store works, but:
+
+- Its search box defaults to a content field `content` and a vector field
+  `contentVector`. This index has neither (`symptom_vector`, `resolution_vector`),
+  so you must set `azure_search_vector_field` explicitly.
+- Its outbound call returned `415 Unsupported Media Type` against this Azure
+  service (verified: Azure rejects only when `Content-Type: application/json` is
+  missing, so LiteLLM is omitting it).
+- It searches one vector field and returns chunk text — it does not apply this
+  project's recency weighting, metadata filters, or resolution pairing.
+
+So a LiteLLM vector store is fine for ad-hoc browsing by a human, but the MCP
+server is the supported path for the helpdesk agent.
+
+### Steps to give Axle the KB
+
+1. **Run the MCP server** where the Gateway can reach it:
+
+   ```bash
+   docker compose --profile mcp up -d          # binds 0.0.0.0:8100
+   ```
+
+   Set `KB_MCP_AUTH_TOKEN` to a strong random value (`openssl rand -hex 32`).
+
+2. **Register it with OpenClaw** as an MCP server (streamable-http), pointing at
+   `http://<host>:8100/mcp` with `Authorization: Bearer <KB_MCP_AUTH_TOKEN>`.
+   Verify with a probe, then confirm `search_kb` appears in the tool list.
+
+3. **Tell the agent when to use it.** Add to the helpdesk skill: on a new,
+   non-obvious ticket, call `search_kb` with the requester's symptom text first,
+   then check any returned IT Glue links. The KB is the fallback layer; IT Glue
+   stays authoritative.
+
+4. **Do not auto-reply** from retrieved content. The tool is a suggestion
+   source; a human or the agent verifies before acting, per the existing
+   FreshService skill.
+
+### Interaction with the existing MCP stack
+
+The Gateway already proxies FreshService, AD, Horizon, IT Glue, etc. via
+`litellm`. `fskb-mcp` is a separate, small server with one job (retrieval), so it
+can be registered independently and its token rotated without touching the
+others. If you would rather not run another daemon, run it over **stdio** and
+let the Gateway spawn it — but the http daemon is simpler to operate and
+monitor (`/health`).
+
+## GitHub
+
+```bash
+git init -b main
+git add -A
+git commit -m "Initial commit"
+git remote add origin git@github.com:<org>/freshservice-kb.git
+git push -u origin main
+```
+
+Confirmed clean before commit: `.env`, `.state/`, `out/`, `gold/` and `feedback/`
+are git-ignored, and only `.env.example` (placeholder values) is tracked. Verify
+with `git status --short` and `git diff --cached --name-only` before pushing.
 
 ## Embeddings / secret handling
 
