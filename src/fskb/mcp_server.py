@@ -219,12 +219,60 @@ class _BearerAuthMiddleware:
         return await self.app(scope, receive, send)
 
 
+def _fingerprint(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def check_auth() -> int:
+    """Diagnose the configured MCP bearer token WITHOUT printing it.
+
+    Prints a fingerprint so you can compare the container's token against the
+    value you are sending. Flags the silent mismatches (quotes, whitespace,
+    CR) that all produce a 401 with a token that 'looks' correct.
+    """
+
+    token = os.environ.get("KB_MCP_AUTH_TOKEN", "")
+    print(f"KB_MCP_AUTH_TOKEN set : {bool(token)}")
+    print(f"  length              : {len(token)}")
+    print(f"  fingerprint (sha256): {_fingerprint(token) if token else '<empty>'}")
+    problems = []
+    if token != token.strip():
+        problems.append("leading/trailing whitespace")
+    if token.startswith(('"', "'")) or token.endswith(('"', "'")):
+        problems.append("wrapped in quote characters")
+    if "\r" in token or "\n" in token:
+        problems.append("contains CR/LF")
+    if not token:
+        problems.append("EMPTY - auth is disabled (this does NOT cause 401)")
+    if problems:
+        print("  PROBLEMS            : " + "; ".join(problems))
+    else:
+        print("  PROBLEMS            : none")
+    return 0
+
+
+def hash_token(value: str) -> int:
+    """Print the fingerprint of a token you want to compare."""
+
+    print(_fingerprint(value))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="fskb-mcp", description="FreshService KB retrieval MCP server")
     parser.add_argument("--transport", default="stdio", choices=["stdio", "http", "sse", "streamable-http"])
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8014)
+    parser.add_argument("--check-auth", action="store_true", help="print the token fingerprint + problems, then exit")
+    parser.add_argument("--hash-token", default=None, help="fingerprint a token value for comparison, then exit")
     args = parser.parse_args(argv)
+
+    if args.hash_token is not None:
+        return hash_token(args.hash_token)
+    if args.check_auth:
+        return check_auth()
 
     mcp = build_server()
     if args.transport == "stdio":

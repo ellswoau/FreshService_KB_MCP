@@ -45,8 +45,10 @@ services:
     command: ["fskb-mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8014"]
     env_file: .env
     environment:
-      # Required: bearer token gating the MCP endpoint. Set it in .env.
-      KB_MCP_AUTH_TOKEN: "${KB_MCP_AUTH_TOKEN}"
+      # KB_MCP_AUTH_TOKEN comes from .env via env_file above. Do NOT also list it
+      # under `environment:` - if the shell var is unset, compose substitutes an
+      # empty string and OVERRIDES the env_file value, which silently disables
+      # auth / causes mismatches.
       KB_BOOST_PATH: /app/feedback/boost.json
     ports:
       - "8014:8014"
