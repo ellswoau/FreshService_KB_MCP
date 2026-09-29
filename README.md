@@ -259,7 +259,7 @@ Cadence rationale:
 ```bash
 pip install -e ".[mcp]"
 fskb-mcp                              # stdio (embedded MCP client)
-fskb-mcp --transport http --port 8100 # network daemon (bearer-gated)
+fskb-mcp --transport http --port 8013 # network daemon (bearer-gated)
 
 docker compose --profile mcp up -d    # containerised daemon
 ```
@@ -317,13 +317,13 @@ server is the supported path for the helpdesk agent.
 1. **Run the MCP server** where the Gateway can reach it:
 
    ```bash
-   docker compose --profile mcp up -d          # binds 0.0.0.0:8100
+   docker compose --profile mcp up -d          # binds 0.0.0.0:8013
    ```
 
    Set `KB_MCP_AUTH_TOKEN` to a strong random value (`openssl rand -hex 32`).
 
 2. **Register it with OpenClaw** as an MCP server (streamable-http), pointing at
-   `http://<host>:8100/mcp` with `Authorization: Bearer <KB_MCP_AUTH_TOKEN>`.
+   `http://<host>:8013/mcp` with `Authorization: Bearer <KB_MCP_AUTH_TOKEN>`.
    Verify with a probe, then confirm `search_kb` appears in the tool list.
 
 3. **Tell the agent when to use it.** Add to the helpdesk skill: on a new,

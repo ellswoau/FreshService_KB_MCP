@@ -7,7 +7,7 @@ returns the prior fixes.
 
 Run:
     python -m fskb.mcp_server                          # stdio (embedded client)
-    python -m fskb.mcp_server --transport http --port 8100
+    python -m fskb.mcp_server --transport http --port 8013
 
 Network transports are gated behind a bearer token (``KB_MCP_AUTH_TOKEN``);
 ``/health`` stays credential-free for monitors.
@@ -223,7 +223,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="fskb-mcp", description="FreshService KB retrieval MCP server")
     parser.add_argument("--transport", default="stdio", choices=["stdio", "http", "sse", "streamable-http"])
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8100)
+    parser.add_argument("--port", type=int, default=8013)
     args = parser.parse_args(argv)
 
     mcp = build_server()
