@@ -1,0 +1,13 @@
+.venv/
+.state/
+.env
+out/
+feedback/
+gold/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.git/
+Dockerfile
+docker-compose.yml

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshservice-kb"
+version = "0.1.0"
+description = "Build an Azure AI Search knowledge base from resolved FreshService helpdesk tickets."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+mcp = ["fastmcp>=2.2.0"]
+
+[project.scripts]
+fskb = "fskb.cli:main"
+fskb-mcp = "fskb.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

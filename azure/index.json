@@ -1,0 +1,59 @@
+{
+  "name": "freshservice-kb-v1",
+  "fields": [
+    { "name": "id", "type": "Edm.String", "key": true, "filterable": true },
+    { "name": "ticket_id", "type": "Edm.Int32", "filterable": true, "sortable": true, "facetable": true },
+    { "name": "display_id", "type": "Edm.String", "filterable": true, "retrievable": true },
+    { "name": "subject", "type": "Edm.String", "searchable": true, "retrievable": true },
+    { "name": "symptom_text", "type": "Edm.String", "searchable": true, "retrievable": true },
+    { "name": "resolution_text", "type": "Edm.String", "searchable": true, "retrievable": true },
+    { "name": "resolution_source", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "has_resolution", "type": "Edm.Boolean", "filterable": true, "retrievable": true },
+    { "name": "category", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "sub_category", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "item_category", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "department", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "store", "type": "Collection(Edm.String)", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "group", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "ticket_type", "type": "Edm.String", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "tags", "type": "Collection(Edm.String)", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "error_codes", "type": "Collection(Edm.String)", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "hostnames", "type": "Collection(Edm.String)", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "apps", "type": "Collection(Edm.String)", "filterable": true, "facetable": true, "retrievable": true },
+    { "name": "created_at", "type": "Edm.DateTimeOffset", "filterable": true, "sortable": true, "retrievable": true },
+    { "name": "closed_at", "type": "Edm.DateTimeOffset", "filterable": true, "sortable": true, "retrievable": true },
+    { "name": "updated_at", "type": "Edm.DateTimeOffset", "filterable": true, "sortable": true, "retrievable": true },
+    { "name": "age_days", "type": "Edm.Int32", "filterable": true, "sortable": true, "retrievable": true },
+    { "name": "linked_itglue_doc_ids", "type": "Collection(Edm.String)", "filterable": true, "retrievable": true },
+    { "name": "linked_itglue_urls", "type": "Collection(Edm.String)", "retrievable": true },
+    { "name": "symptom_vector", "type": "Collection(Edm.Single)", "searchable": true, "retrievable": false, "dimensions": 3072, "vectorSearchProfile": "hnsw-profile" },
+    { "name": "resolution_vector", "type": "Collection(Edm.Single)", "searchable": true, "retrievable": false, "dimensions": 3072, "vectorSearchProfile": "hnsw-profile" }
+  ],
+  "vectorSearch": {
+    "algorithms": [
+      { "name": "hnsw-config", "kind": "hnsw", "hnswParameters": { "m": 4, "efConstruction": 400, "efSearch": 500, "metric": "cosine" } }
+    ],
+    "profiles": [
+      { "name": "hnsw-profile", "algorithm": "hnsw-config" }
+    ]
+  },
+  "semantic": {
+    "configurations": [
+      {
+        "name": "default-semantic",
+        "prioritizedFields": {
+          "titleField": { "fieldName": "subject" },
+          "prioritizedContentFields": [
+            { "fieldName": "symptom_text" },
+            { "fieldName": "resolution_text" }
+          ],
+          "prioritizedKeywordsFields": [
+            { "fieldName": "error_codes" },
+            { "fieldName": "hostnames" },
+            { "fieldName": "apps" }
+          ]
+        }
+      }
+    ]
+  }
+}
