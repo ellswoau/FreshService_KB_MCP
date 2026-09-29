@@ -232,6 +232,41 @@ Tunables (env / compose):
 
 A failed run is logged and retried on the next tick — it never kills the loop.
 
+### Always-on: auto-restart and start on boot
+
+Both services run with `restart: unless-stopped`, so Docker restarts them on
+crash. For **start on boot** the Docker daemon itself must be enabled — the
+container restart policy only takes effect once the daemon is up.
+
+```bash
+# 1. Both services start with one command (no profile needed):
+docker compose up -d
+
+# 2. Make the Docker daemon start on boot (systemd hosts):
+sudo systemctl enable docker
+
+# 3. Verify the restart policy is in effect (should read "unless-stopped"):
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' freshservice-kb-updater freshservice-kb-mcp
+
+# 4. Reboot test:
+sudo reboot
+# after it comes back:
+docker ps --filter name=freshservice-kb --format '{{.Names}}\t{{.Status}}'
+```
+
+Notes:
+
+- `unless-stopped` restarts after a crash or reboot, but respects an explicit
+  `docker stop` (it will NOT come back until you `up` it again). Use `always` if
+  you want it to restart even after a manual stop.
+- If you use **rootless Docker**, boot-start is different: enable the user
+  service with `systemctl --user enable docker` (and `loginctl enable-linger
+  $USER`), not the system one.
+- Don't also run a cron job against the same pipeline — the scheduler is already
+  a loop, and two processes would both hold the same watermark.
+- `docker compose up -d` recreates containers if the image or config changed;
+  a plain `docker restart` does not pick up a rebuilt image.
+
 ### Direct / other schedulers
 
 ```bash
@@ -261,7 +296,7 @@ pip install -e ".[mcp]"
 fskb-mcp                              # stdio (embedded MCP client)
 fskb-mcp --transport http --port 8014 # network daemon (bearer-gated)
 
-docker compose --profile mcp up -d    # containerised daemon
+docker compose up -d                  # starts BOTH services (updater + mcp)
 ```
 
 Tools:
@@ -317,7 +352,7 @@ server is the supported path for the helpdesk agent.
 1. **Run the MCP server** where the Gateway can reach it:
 
    ```bash
-   docker compose --profile mcp up -d          # binds 0.0.0.0:8014
+   docker compose up -d                        # starts both; binds 0.0.0.0:8014
    ```
 
    Set `KB_MCP_AUTH_TOKEN` to a strong random value (`openssl rand -hex 32`).

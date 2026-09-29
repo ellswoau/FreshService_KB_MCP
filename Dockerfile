@@ -32,5 +32,7 @@ EXPOSE 8014
 #   docker run -p 8014:8014 freshservice-kb fskb-mcp --transport http --port 8014
 CMD ["python", "scripts/scheduler.py"]
 
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-  CMD python -c "import os,sys; sys.exit(0 if os.path.exists(os.environ.get('STATE_DIR','/data/.state')+'/state.json') else 1)"
+# No image-level HEALTHCHECK: the correct probe depends on the service role
+# (the updater has a watermark file, the MCP server has /health). Per-role
+# healthchecks live in docker-compose.yml so the MCP container is never
+# wrongly marked unhealthy for lacking a watermark.
