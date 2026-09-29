@@ -26,10 +26,10 @@ ENV STATE_DIR=/data/.state
 USER fskb
 
 # MCP server port (network transport). The scheduler does not bind a port.
-EXPOSE 8013
+EXPOSE 8014
 
 # Default: long-running 4-hourly updater. Override to run the MCP server:
-#   docker run -p 8013:8013 freshservice-kb fskb-mcp --transport http --port 8013
+#   docker run -p 8014:8014 freshservice-kb fskb-mcp --transport http --port 8014
 CMD ["python", "scripts/scheduler.py"]
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
