@@ -188,3 +188,42 @@ class FreshServiceClient:
         if isinstance(payload, dict):
             return payload.get("conversations", []) or []
         return payload or []
+
+    # --- changes (change management) -----------------------------------
+    def list_changes(
+        self, updated_since: Optional[str] = None, limit: Optional[int] = None
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield change records (what infrastructure is changing, and when).
+
+        Changes carry ``subject``, ``status``, ``planned_start_date``,
+        ``planned_end_date`` and ``impacted_services`` -- the raw material for
+        correlating "what changed" with an outage.
+        """
+
+        page = 1
+        per_page = max(1, min(self.settings.fs_per_page, 100))
+        seen = 0
+        while True:
+            params: Dict[str, Any] = {"page": page, "per_page": per_page}
+            if updated_since:
+                params["updated_since"] = updated_since
+            payload = self._get("/api/v2/changes", params=params)
+            items: List[dict] = payload.get("changes", []) if isinstance(payload, dict) else []
+            if not items:
+                return
+            for c in items:
+                yield c
+                seen += 1
+                if limit is not None and seen >= limit:
+                    return
+            if len(items) < per_page:
+                return
+            page += 1
+            if page > 90:
+                return
+
+    def get_change(self, change_id: int) -> Dict[str, Any]:
+        payload = self._get(f"/api/v2/changes/{int(change_id)}")
+        if isinstance(payload, dict) and "change" in payload:
+            return payload["change"]
+        return payload if isinstance(payload, dict) else {}

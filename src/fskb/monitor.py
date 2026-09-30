@@ -354,6 +354,8 @@ class MonitorConfig:
     horizon_mcp_url: Optional[str] = None
     horizon_mcp_auth_token: Optional[str] = None
     horizon_mcp_verify_ssl: bool = True
+    change_enabled: bool = True
+    change_lookback_hours: int = 72
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MonitorConfig":
@@ -383,6 +385,8 @@ class MonitorConfig:
             horizon_mcp_url=settings.horizon_mcp_url,
             horizon_mcp_auth_token=settings.horizon_mcp_auth_token,
             horizon_mcp_verify_ssl=settings.horizon_mcp_verify_ssl,
+            change_enabled=settings.monitor_change_enabled,
+            change_lookback_hours=settings.monitor_change_lookback_hours,
         )
 
 
@@ -477,7 +481,7 @@ class CorrelatedMonitor:
             return None
         tickets = sorted(tickets, key=lambda t: (t.created_at, t.id))
         first = tickets[0]
-        evidence = self._corroborate(now, tickets)
+        evidence = self._corroborate(now, tickets, key)
         note = self.compose_note(key, tickets, now, evidence=evidence)
         alert_id = self.store.record_alert(
             key, first.id, now, len(tickets), now + timedelta(minutes=self.cfg.cooldown_minutes),
@@ -562,9 +566,9 @@ class CorrelatedMonitor:
 
     # --- corroborators (Phase 3) ---
     def _corroborate(
-        self, now: datetime, tickets: Optional[Sequence[Ticket]] = None
+        self, now: datetime, tickets: Optional[Sequence[Ticket]] = None, key: Optional[str] = None
     ) -> Optional[CorroborationResult]:
-        if self.graylog is None and self.horizon_mcp is None:
+        if self.graylog is None and self.horizon_mcp is None and self.client is None:
             return None
         try:
             return corroborate(
@@ -577,6 +581,9 @@ class CorrelatedMonitor:
                 limit=self.cfg.corroborate_limit,
                 mcp_client=self.horizon_mcp,
                 pool_hint=_pool_hint(tickets) if tickets else None,
+                changes_client=self.client if self.cfg.change_enabled else None,
+                change_lookback_hours=self.cfg.change_lookback_hours,
+                keywords=_cluster_keywords(key, tickets),
             )
         except Exception as exc:  # evidence is best-effort; never lose the alert
             self.emit(f"[corroborate] error: {exc}")
@@ -645,6 +652,28 @@ def _indent(text: str, prefix: str = "    ") -> str:
 
 
 _POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
+_STOPWORDS = {"with", "from", "that", "this", "cannot", "issue", "issues", "other", "desktop", "account", "error", "errors"}
+
+
+def _cluster_keywords(key: Optional[str], tickets: Optional[Sequence[Ticket]]) -> List[str]:
+    """Words that identify the cluster's system, for matching against changes.
+
+    From the cluster key + label (``app:engage`` -> engage) and the tickets'
+    system key (category/sub_category). Words <4 chars and generic stopwords are
+    dropped so a change is only matched on something meaningful.
+    """
+
+    sources: List[str] = []
+    if key:
+        sources.append(f"{key} {label_for(key)}")
+    for t in tickets or []:
+        sources.append(t.system_key or "")
+    words = set()
+    for src in sources:
+        for part in re.split(r"[^a-z0-9]+", src.lower()):
+            if len(part) >= 4 and part not in _STOPWORDS:
+                words.add(part)
+    return sorted(words)
 
 
 def _pool_hint(tickets: Optional[Sequence[Ticket]]) -> Optional[str]:

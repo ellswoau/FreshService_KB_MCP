@@ -248,6 +248,57 @@ def _resolve_pool(mcp_client: Optional[MCPClient], pool_hint: Optional[str]) -> 
     return None
 
 
+def corroborate_changes(
+    changes_client: Any,
+    window_start: datetime,
+    window_end: datetime,
+    lookback_hours: int = 72,
+    keywords: Optional[List[str]] = None,
+    limit: int = 6,
+) -> SignalResult:
+    """Recent FreshService changes = a CAUSE source (what changed, when, systems).
+
+    A change near the cluster that names an overlapping system is strong cause
+    evidence; ``mode='presence'`` (a matching change matters on its own).
+    """
+
+    since = window_start - timedelta(hours=lookback_hours)
+    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    kws = [k.lower() for k in (keywords or []) if k]
+    matched: List[Dict[str, Any]] = []
+    total = 0
+    for ch in changes_client.list_changes(updated_since=since_str):
+        total += 1
+        text = " ".join(
+            str(ch.get(f) or "") for f in
+            ("subject", "description_text", "impacted_services", "category", "sub_category")
+        ).lower()
+        if kws and not any(k in text for k in kws):
+            continue
+        matched.append(ch)
+    samples = [
+        {
+            "id": c.get("id"),
+            "subject": c.get("subject"),
+            "status": c.get("status"),
+            "planned_start": c.get("planned_start_date"),
+            "planned_end": c.get("planned_end_date"),
+            "impacted": c.get("impacted_services"),
+        }
+        for c in matched[:limit]
+    ]
+    return SignalResult(
+        key="change_feed",
+        role="cause",
+        stream="freshservice-changes",
+        query=f"changes updated_since {since_str}" + (f" keywords={kws}" if kws else ""),
+        count=len(matched),
+        samples=samples,
+        mode="presence",
+        note="Recent FreshService changes (what/when/systems).",
+    )
+
+
 def corroborate(
     client: GraylogClient,
     catalog: Dict[str, Any],
@@ -258,6 +309,9 @@ def corroborate(
     limit: int = 8,
     mcp_client: Optional[MCPClient] = None,
     pool_hint: Optional[str] = None,
+    changes_client: Any = None,
+    change_lookback_hours: int = 72,
+    keywords: Optional[List[str]] = None,
 ) -> CorroborationResult:
     """Run every catalog signal for a cluster window and score the evidence.
 
@@ -311,6 +365,18 @@ def corroborate(
                 SignalResult(key="vdi.pool_errors", role="effect", stream="horizon-mcp",
                              query="desktop_pool_status", count=0, mode="presence",
                              note=f"unavailable: {exc}")
+            )
+
+    if changes_client is not None:
+        try:
+            results.append(corroborate_changes(
+                changes_client, window_start, window_end,
+                lookback_hours=change_lookback_hours, keywords=keywords,
+            ))
+        except Exception as exc:  # evidence is best-effort
+            results.append(
+                SignalResult(key="change_feed", role="cause", stream="freshservice-changes",
+                             query="changes", count=0, mode="presence", note=f"unavailable: {exc}")
             )
 
     cause_hit = any(r.role == "cause" and r.elevated for r in results)

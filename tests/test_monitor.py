@@ -414,6 +414,15 @@ def test_pool_hint_from_machine_hostname():
     assert M._pool_hint([parse_ticket({"id": 2, "created_at": _iso(T0), "description_text": "vpn"})]) is None
 
 
+def test_cluster_keywords_drop_generic_words():
+    t = parse_ticket({"id": 1, "created_at": _iso(T0), "description_text": "engage",
+                      "category": "Engage", "sub_category": "Engage Desktop"})
+    kw = M._cluster_keywords("app:engage", [t])
+    assert "engage" in kw
+    assert "desktop" not in kw            # stopword
+    assert all(len(w) >= 4 for w in kw)
+
+
 class _FakeMCP:
     def call_tool(self, name, arguments=None):
         assert name == "desktop_pool_status"

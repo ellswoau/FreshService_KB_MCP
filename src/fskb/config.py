@@ -127,6 +127,10 @@ class Settings:
     horizon_mcp_verify_ssl: bool = True
     monitor_horizon_enabled: bool = True
 
+    # Change feed (FreshService changes) as a cause corroborator
+    monitor_change_enabled: bool = True
+    monitor_change_lookback_hours: int = 72
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -177,6 +181,8 @@ class Settings:
             horizon_mcp_auth_token=_env("HORIZON_MCP_AUTH_TOKEN"),
             horizon_mcp_verify_ssl=_env_bool("HORIZON_MCP_VERIFY_SSL", True),
             monitor_horizon_enabled=_env_bool("MONITOR_HORIZON_ENABLED", True),
+            monitor_change_enabled=_env_bool("MONITOR_CHANGE_ENABLED", True),
+            monitor_change_lookback_hours=_env_int("MONITOR_CHANGE_LOOKBACK_HOURS", 72),
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------

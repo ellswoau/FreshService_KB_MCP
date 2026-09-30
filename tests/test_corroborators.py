@@ -169,3 +169,41 @@ def test_no_pool_hint_leaves_queries_global():
 
     C.corroborate(_G(), C.load_catalog(), NOW - timedelta(minutes=60), NOW)
     assert seen and not any("DesktopId" in q for q in seen)
+
+
+# --- change feed (FreshService changes as a cause) --------------------------
+class _FakeChanges:
+    def __init__(self, changes):
+        self.changes = changes
+
+    def list_changes(self, updated_since=None):
+        return iter(self.changes)
+
+
+def test_change_feed_matches_cluster_keywords():
+    changes = [
+        {"id": 1, "subject": "Standard Change: Updating Conditional Access store IP addresses",
+         "impacted_services": ["Azure AD"], "planned_start_date": "2026-09-29T04:00:00Z"},
+        {"id": 2, "subject": "Printer firmware refresh", "impacted_services": ["Printers"]},
+    ]
+    sig = C.corroborate_changes(_FakeChanges(changes), NOW - timedelta(minutes=60), NOW,
+                                keywords=["conditional", "access"])
+    assert sig.role == "cause" and sig.mode == "presence"
+    assert sig.count == 1 and sig.samples[0]["id"] == 1
+    assert sig.elevated is True
+
+
+def test_change_feed_without_keywords_counts_all():
+    changes = [{"id": 1, "subject": "a"}, {"id": 2, "subject": "b"}]
+    sig = C.corroborate_changes(_FakeChanges(changes), NOW - timedelta(minutes=60), NOW)
+    assert sig.count == 2
+
+
+def test_corroborate_includes_change_signal_when_client_present():
+    changes = _FakeChanges([{"id": 9, "subject": "Change affecting Engage", "impacted_services": ["Engage"]}])
+    res = C.corroborate(_FakeGraylog(cause=0, effect=0), C.load_catalog(),
+                        NOW - timedelta(minutes=60), NOW, changes_client=changes,
+                        keywords=["engage"])
+    sig = [r for r in res.results if r.key == "change_feed"][0]
+    assert sig.count == 1
+    assert res.confidence == C.CONF_CONSISTENT  # cause present, no effect
