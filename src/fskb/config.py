@@ -121,6 +121,12 @@ class Settings:
     monitor_corroborate_effect_lookback_hours: int = 1
     monitor_corroborate_limit: int = 8
 
+    # Corroborators via house MCP servers (Horizon pool status)
+    horizon_mcp_url: Optional[str] = None
+    horizon_mcp_auth_token: Optional[str] = None
+    horizon_mcp_verify_ssl: bool = True
+    monitor_horizon_enabled: bool = True
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -167,6 +173,10 @@ class Settings:
             monitor_corroborate_cause_lookback_hours=_env_int("MONITOR_CORROBORATE_CAUSE_LOOKBACK_HOURS", 24),
             monitor_corroborate_effect_lookback_hours=_env_int("MONITOR_CORROBORATE_EFFECT_LOOKBACK_HOURS", 1),
             monitor_corroborate_limit=_env_int("MONITOR_CORROBORATE_LIMIT", 8),
+            horizon_mcp_url=(_env("HORIZON_MCP_URL") or "").rstrip("/") or None,
+            horizon_mcp_auth_token=_env("HORIZON_MCP_AUTH_TOKEN"),
+            horizon_mcp_verify_ssl=_env_bool("HORIZON_MCP_VERIFY_SSL", True),
+            monitor_horizon_enabled=_env_bool("MONITOR_HORIZON_ENABLED", True),
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------

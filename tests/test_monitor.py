@@ -403,3 +403,38 @@ def test_note_without_corroborators_still_composes(tmp_path):
     note = mon.compose_note("app:engage", tickets, T0)
     assert "Corroborators" not in note  # no evidence -> no section
     assert "#1000" in note
+
+
+# --- pool hint + horizon MCP evidence --------------------------------------
+def test_pool_hint_from_machine_hostname():
+    t = parse_ticket({"id": 1, "created_at": _iso(T0),
+                      "description_text": "Computer MAN2-VDI-128 cannot log into Engage"})
+    assert M._pool_hint([t]) == "man2"
+    assert M._pool_hint([]) is None
+    assert M._pool_hint([parse_ticket({"id": 2, "created_at": _iso(T0), "description_text": "vpn"})]) is None
+
+
+class _FakeMCP:
+    def call_tool(self, name, arguments=None):
+        assert name == "desktop_pool_status"
+        return {"pools": [
+            {"name": "man2-vdi", "display_name": "GR Manufacturing Pool", "error_count": 3},
+            {"name": "bos1-vdi", "display_name": "GR Office and Sales Pool", "error_count": 0},
+        ]}
+
+
+def test_alert_evidence_includes_horizon_pool_errors(tmp_path):
+    import json as _json
+
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), dry_run=True)
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    mon.graylog = _FakeGraylog()
+    mon.horizon_mcp = _FakeMCP()
+    lines = []
+    mon.emit = lines.append
+    fired = mon.replay(_synthetic(3), now=T0 + timedelta(minutes=5))
+    assert len(fired) == 1
+    ev = _json.loads(mon.store.conn.execute(
+        "SELECT evidence FROM alert WHERE id=?", (fired[0],)).fetchone()["evidence"])
+    assert any(s["key"] == "vdi.pool_errors" for s in ev["signals"])
+    assert any("vdi.pool_errors" in ln for ln in lines)

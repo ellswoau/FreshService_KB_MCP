@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import statistics
 import sys
@@ -42,6 +43,7 @@ from zoneinfo import ZoneInfo
 from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
 from .corroborators import CorroborationResult, GraylogClient, corroborate, load_catalog
+from .mcp_client import MCPClient
 
 # A report hook receives (alert_id, cluster_key, tickets, note_text) and returns
 # nothing. Default is a no-op: Phase 1 leaves the report channel pluggable and
@@ -348,6 +350,10 @@ class MonitorConfig:
     graylog_url: Optional[str] = None
     graylog_api_token: Optional[str] = None
     graylog_verify_ssl: bool = True
+    horizon_enabled: bool = True
+    horizon_mcp_url: Optional[str] = None
+    horizon_mcp_auth_token: Optional[str] = None
+    horizon_mcp_verify_ssl: bool = True
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MonitorConfig":
@@ -373,6 +379,10 @@ class MonitorConfig:
             graylog_url=settings.graylog_url,
             graylog_api_token=settings.graylog_api_token,
             graylog_verify_ssl=settings.graylog_verify_ssl,
+            horizon_enabled=settings.monitor_horizon_enabled,
+            horizon_mcp_url=settings.horizon_mcp_url,
+            horizon_mcp_auth_token=settings.horizon_mcp_auth_token,
+            horizon_mcp_verify_ssl=settings.horizon_mcp_verify_ssl,
         )
 
 
@@ -396,6 +406,11 @@ class CorrelatedMonitor:
         if config.corroborate_enabled and config.graylog_url and config.graylog_api_token:
             self.graylog = GraylogClient(
                 config.graylog_url, config.graylog_api_token, config.graylog_verify_ssl
+            )
+        self.horizon_mcp: Optional[MCPClient] = None
+        if config.horizon_enabled and config.horizon_mcp_url and config.horizon_mcp_auth_token:
+            self.horizon_mcp = MCPClient(
+                config.horizon_mcp_url, config.horizon_mcp_auth_token, config.horizon_mcp_verify_ssl
             )
 
     # --- ingestion ---
@@ -462,7 +477,7 @@ class CorrelatedMonitor:
             return None
         tickets = sorted(tickets, key=lambda t: (t.created_at, t.id))
         first = tickets[0]
-        evidence = self._corroborate(now)
+        evidence = self._corroborate(now, tickets)
         note = self.compose_note(key, tickets, now, evidence=evidence)
         alert_id = self.store.record_alert(
             key, first.id, now, len(tickets), now + timedelta(minutes=self.cfg.cooldown_minutes),
@@ -546,8 +561,10 @@ class CorrelatedMonitor:
             self.emit(f"[baseline] error: {exc}")
 
     # --- corroborators (Phase 3) ---
-    def _corroborate(self, now: datetime) -> Optional[CorroborationResult]:
-        if self.graylog is None:
+    def _corroborate(
+        self, now: datetime, tickets: Optional[Sequence[Ticket]] = None
+    ) -> Optional[CorroborationResult]:
+        if self.graylog is None and self.horizon_mcp is None:
             return None
         try:
             return corroborate(
@@ -558,6 +575,8 @@ class CorrelatedMonitor:
                 cause_lookback_hours=self.cfg.corroborate_cause_lookback_hours,
                 effect_lookback_hours=self.cfg.corroborate_effect_lookback_hours,
                 limit=self.cfg.corroborate_limit,
+                mcp_client=self.horizon_mcp,
+                pool_hint=_pool_hint(tickets) if tickets else None,
             )
         except Exception as exc:  # evidence is best-effort; never lose the alert
             self.emit(f"[corroborate] error: {exc}")
@@ -623,6 +642,24 @@ class CorrelatedMonitor:
 
 def _indent(text: str, prefix: str = "    ") -> str:
     return "\n".join(prefix + ln for ln in text.splitlines())
+
+
+_POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
+
+
+def _pool_hint(tickets: Optional[Sequence[Ticket]]) -> Optional[str]:
+    """Machine hostname in a ticket -> site code that a Horizon pool name starts with.
+
+    e.g. ``MAN2-VDI-128`` -> ``man2``, which matches pool ``man2-vdi``. Used to
+    check the corroborating effect is on the SAME population as the cluster.
+    """
+
+    for t in tickets or []:
+        text = f"{t.subject or ''}\n{t.description_text or ''}"
+        m = _POOL_HINT.search(text)
+        if m:
+            return m.group(1).lower()
+    return None
 
 
 def _evidence_json(evidence: Optional[CorroborationResult]) -> Optional[str]:
@@ -705,6 +742,7 @@ def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port:
                     "window_keys": monitor.window.keys(),
                     "dry_run": monitor.cfg.dry_run,
                     "corroborate": monitor.graylog is not None,
+                    "horizon_mcp": monitor.horizon_mcp is not None,
                 }
             ).encode()
             self.send_response(200)

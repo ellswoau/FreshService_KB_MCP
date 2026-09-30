@@ -91,3 +91,40 @@ def test_effect_presence_alone_is_not_elevated():
 def test_corroborate_queries_every_catalog_signal():
     res = _run(cause=1, effect=1, prior=0)
     assert len(res.results) == len(C.load_catalog()["signals"])
+
+
+# --- Horizon via MCP + pool alignment --------------------------------------
+class _FakeMCP:
+    def __init__(self, pools):
+        self.pools = pools
+
+    def call_tool(self, name, arguments=None):
+        assert name == "desktop_pool_status"
+        return {"pools": self.pools}
+
+
+def test_horizon_pool_errors_is_a_presence_effect():
+    mcp = _FakeMCP([
+        {"name": "man2-vdi", "display_name": "GR Manufacturing Pool", "error_count": 4},
+        {"name": "bos1-vdi", "display_name": "GR Office and Sales Pool", "error_count": 0},
+    ])
+    res = C.corroborate(_FakeGraylog(cause=0, effect=0), C.load_catalog(),
+                        NOW - timedelta(minutes=60), NOW, mcp_client=mcp, pool_hint="man2")
+    sig = [r for r in res.results if r.key == "vdi.pool_errors"][0]
+    assert sig.count == 4 and sig.elevated is True  # presence mode: errors>0 matters
+    assert sig.samples[0]["pool"] == "GR Manufacturing Pool"
+    # cause none + effect present -> consistent with
+    assert res.confidence == C.CONF_CONSISTENT
+    assert any("aligned" in ln for ln in res.summary_lines())
+
+
+def test_horizon_unavailable_is_not_fatal():
+    class _Boom:
+        def call_tool(self, name, arguments=None):
+            raise RuntimeError("mcp down")
+
+    res = C.corroborate(_FakeGraylog(cause=2, effect=9, prior=2), C.load_catalog(),
+                        NOW - timedelta(minutes=60), NOW, mcp_client=_Boom())
+    sig = [r for r in res.results if r.key == "vdi.pool_errors"][0]
+    assert sig.count == 0  # degraded, but the alert still scores on Graylog
+    assert res.confidence == C.CONF_LIKELY

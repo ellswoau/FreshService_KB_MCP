@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .mcp_client import MCPClient
+
 UTC = timezone.utc
 
 _DATA = Path(__file__).resolve().parent / "data" / "corroborators.json"
@@ -103,16 +105,19 @@ class SignalResult:
     prior_count: int = 0
     samples: List[Dict[str, Any]] = field(default_factory=list)
     note: str = ""
+    mode: str = "presence"  # "presence" (low base rate) | "elevation" (high volume)
 
     @property
     def elevated(self) -> bool:
-        """Effect signals only corroborate when they ELEVATE vs the prior window.
+        """Whether this signal actually corroborates.
 
-        A high-volume effect (e.g. provisioning errors, ~2,300/8wk) is noise on
-        presence alone; the signal is a rise against its own recent baseline.
+        ``presence``: any hit matters (a low-base-rate cause, or a pool sitting
+        in an ERROR state when it is normally 0). ``elevation``: a high-volume
+        effect is noise on presence alone, so require a rise vs its own prior
+        equal window.
         """
 
-        if self.role != "effect":
+        if self.mode == "presence":
             return self.count > 0
         return self.count >= 3 and self.count >= max(3, 2 * self.prior_count)
 
@@ -121,6 +126,7 @@ class SignalResult:
 class CorroborationResult:
     results: List[SignalResult] = field(default_factory=list)
     confidence: str = CONF_NONE
+    pool_hint: Optional[str] = None
 
     def by_role(self, role: str) -> List[SignalResult]:
         return [r for r in self.results if r.role == role]
@@ -146,6 +152,14 @@ class CorroborationResult:
         pools = self.pools()
         if pools:
             lines.append(f"  pools seen: {', '.join(pools)}")
+        if self.pool_hint:
+            hint = self.pool_hint.lower()
+            aligned = [p for p in pools if hint in (p or "").lower()]
+            lines.append(
+                f"  cluster machine hint '{self.pool_hint}' -> \
+"
+                f"aligned pool(s): {', '.join(aligned) if aligned else 'none matched'}"
+            )
         lines.append("  (independent systems; cause window widened, clocks aligned to UTC)")
         return lines
 
@@ -168,6 +182,40 @@ def _sample(entry: Dict[str, Any], signal: Dict[str, Any], catalog: Dict[str, An
     return out
 
 
+def corroborate_horizon_pools(mcp_client: MCPClient, pool_hint: Optional[str] = None) -> SignalResult:
+    """Pool cloning/ERROR counts from Horizon via ``horizon-mcp`` (effect).
+
+    A pool in an ERROR state when it is normally 0 is meaningful on PRESENCE, so
+    this signal uses ``mode='presence'`` (unlike the high-volume Graylog effect).
+    """
+
+    status = mcp_client.call_tool("desktop_pool_status", {})
+    pools = status.get("pools", []) or []
+    samples: List[Dict[str, Any]] = []
+    total = 0
+    for p in pools:
+        ec = int(p.get("error_count") or 0)
+        total += ec
+        if ec:
+            samples.append(
+                {
+                    "pool": p.get("display_name") or p.get("name"),
+                    "name": p.get("name"),
+                    "error_count": ec,
+                }
+            )
+    return SignalResult(
+        key="vdi.pool_errors",
+        role="effect",
+        stream="horizon-mcp",
+        query="desktop_pool_status",
+        count=total,
+        samples=samples,
+        mode="presence",
+        note="Horizon pool cloning/ERROR state (current); normally 0.",
+    )
+
+
 def corroborate(
     client: GraylogClient,
     catalog: Dict[str, Any],
@@ -176,6 +224,8 @@ def corroborate(
     cause_lookback_hours: int = 24,
     effect_lookback_hours: int = 1,
     limit: int = 8,
+    mcp_client: Optional[MCPClient] = None,
+    pool_hint: Optional[str] = None,
 ) -> CorroborationResult:
     """Run every catalog signal for a cluster window and score the evidence."""
 
@@ -188,7 +238,10 @@ def corroborate(
         frm = window_start - timedelta(hours=lookback)
         to = window_end
         query = " OR ".join(sig["any"])
-        data = client.search(stream["id"], query, frm, to, limit=limit)
+        # Effect signals need a big enough sample to count pools; keep only
+        # ``limit`` for the note.
+        fetch = max(limit, 300) if role == "effect" else limit
+        data = client.search(stream["id"], query, frm, to, limit=fetch)
         count = int(data.get("total_results", 0) or 0)
         samples = [_sample(m, sig, catalog) for m in data.get("messages", [])[:limit]]
 
@@ -202,10 +255,21 @@ def corroborate(
             SignalResult(
                 key=sig["key"], role=role, stream=stream_key, query=query,
                 count=count, prior_count=prior, samples=samples, note=sig.get("note", ""),
+                mode="presence" if role == "cause" else "elevation",
             )
         )
 
-    cause_hit = any(r.role == "cause" and r.count > 0 for r in results)
+    if mcp_client is not None:
+        try:
+            results.append(corroborate_horizon_pools(mcp_client, pool_hint))
+        except Exception as exc:  # evidence is best-effort
+            results.append(
+                SignalResult(key="vdi.pool_errors", role="effect", stream="horizon-mcp",
+                             query="desktop_pool_status", count=0, mode="presence",
+                             note=f"unavailable: {exc}")
+            )
+
+    cause_hit = any(r.role == "cause" and r.elevated for r in results)
     effect_hit = any(r.role == "effect" and r.elevated for r in results)
     if cause_hit and effect_hit:
         confidence = CONF_LIKELY
@@ -213,4 +277,4 @@ def corroborate(
         confidence = CONF_CONSISTENT
     else:
         confidence = CONF_NONE
-    return CorroborationResult(results=results, confidence=confidence)
+    return CorroborationResult(results=results, confidence=confidence, pool_hint=pool_hint)
