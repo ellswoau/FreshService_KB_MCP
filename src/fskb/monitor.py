@@ -26,6 +26,7 @@ State (SQLite, WAL, this process is the sole writer):
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import re
@@ -378,6 +379,10 @@ class MonitorConfig:
     fs_mcp_auth_token: Optional[str] = None
     use_fs_mcp_changes: bool = True
     report_webhook: Optional[str] = None
+    report_hook_url: Optional[str] = None
+    report_hook_token: Optional[str] = None
+    api_token: Optional[str] = None
+    note_via_agent: bool = False
     feedback_log: str = "feedback/events.jsonl"
 
     @classmethod
@@ -415,6 +420,10 @@ class MonitorConfig:
             fs_mcp_auth_token=settings.freshservice_mcp_auth_token,
             use_fs_mcp_changes=settings.monitor_use_fs_mcp_changes,
             report_webhook=settings.monitor_report_webhook,
+            report_hook_url=settings.monitor_report_hook_url,
+            report_hook_token=settings.monitor_report_hook_token,
+            api_token=settings.monitor_api_token,
+            note_via_agent=bool(settings.monitor_report_hook_url),
             feedback_log=settings.monitor_feedback_log,
         )
 
@@ -524,9 +533,12 @@ class CorrelatedMonitor:
             key, first.id, now, len(tickets), now + timedelta(minutes=self.cfg.cooldown_minutes),
             evidence=_evidence_json(evidence),
         )
-        if self.cfg.dry_run:
-            self.emit(f"[dry-run] alert #{alert_id} key={key} first={first.id} count={len(tickets)}")
-            self.emit("[dry-run] private note that WOULD be posted:\n" + _indent(note))
+        if self.cfg.dry_run or self.cfg.note_via_agent:
+            why = "dry-run" if self.cfg.dry_run else "note-via-agent (Axle)"
+            self.emit(f"[{'dry-run' if self.cfg.dry_run else 'note-skipped'}] alert #{alert_id} "
+                      f"key={key} first={first.id} count={len(tickets)} ({why})")
+            if self.cfg.dry_run:
+                self.emit("[dry-run] private note that WOULD be posted:\n" + _indent(note))
         else:
             try:
                 self.client.add_private_note(first.id, note)
@@ -713,6 +725,36 @@ def webhook_reporter(url: str, timeout: int = 10):
     return _hook
 
 
+def hook_reporter(url: str, token: str, timeout: int = 30):
+    """Report hook that hands the alert to the Axle OpenClaw agent's hook.
+
+    Axle owns the Teams channel (bot app), so the monitor posts the alert to its
+    ``/hooks/<path>`` endpoint; the agent posts it to the Teams channel. Uses the
+    OpenClaw hook protocol (``x-openclaw-token`` + JSON body).
+    """
+
+    def _hook(alert_id: int, key: str, tickets: List[Ticket], note: str) -> None:
+        payload = {
+            "alert_id": alert_id,
+            "cluster_key": key,
+            "label": label_for(key),
+            "count": len(tickets),
+            "first_ticket_id": tickets[0].id if tickets else None,
+            "tickets": [t.id for t in tickets],
+            "note": note,
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "x-openclaw-token": token},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+
+    return _hook
+
+
 _POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
 _STOPWORDS = {
     "with", "from", "that", "this", "cannot", "issue", "issues", "other", "desktop",
@@ -830,18 +872,47 @@ def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port:
                 self.send_response(404)
                 self.end_headers()
                 return
-            body = json.dumps(
-                {
-                    "status": "ok",
-                    "service": "freshservice-kb-monitor",
-                    "last_poll_at": monitor.store.read_meta_readonly("last_poll_at"),
-                    "window_keys": monitor.window.keys(),
-                    "dry_run": monitor.cfg.dry_run,
-                    "corroborate": monitor.graylog is not None,
-                    "horizon_mcp": monitor.horizon_mcp is not None,
-                }
-            ).encode()
-            self.send_response(200)
+            self._json(200, {
+                "status": "ok",
+                "service": "freshservice-kb-monitor",
+                "last_poll_at": monitor.store.read_meta_readonly("last_poll_at"),
+                "window_keys": monitor.window.keys(),
+                "dry_run": monitor.cfg.dry_run,
+                "corroborate": monitor.graylog is not None,
+                "horizon_mcp": monitor.horizon_mcp is not None,
+                "note_via_agent": monitor.cfg.note_via_agent,
+            })
+
+        def do_POST(self):  # noqa: N802
+            if self.path.split("?")[0] != "/feedback":
+                self.send_response(404)
+                self.end_headers()
+                return
+            token = monitor.cfg.api_token or ""
+            auth = self.headers.get("Authorization", "")
+            if not token or not hmac.compare_digest(auth, "Bearer " + token):
+                self._json(401, {"error": "unauthorized"})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                alert_id = int(payload["alert_id"])
+                verdict = str(payload["verdict"])
+            except Exception as exc:
+                self._json(400, {"error": f"bad request: {exc}"})
+                return
+            monitor.store.record_feedback(alert_id, verdict, payload.get("agent"), payload.get("note"))
+            if payload.get("close") and verdict in ("accept", "reject"):
+                monitor.store.set_status(alert_id, "closed")
+            log_cluster_verdict(
+                Path(monitor.cfg.feedback_log), alert_id, verdict,
+                payload.get("agent"), payload.get("note"), payload.get("cluster_key"),
+            )
+            self._json(200, {"ok": True, "alert_id": alert_id, "verdict": verdict})
+
+        def _json(self, code, obj):  # noqa: ANN001
+            body = json.dumps(obj).encode()
+            self.send_response(code)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
@@ -885,7 +956,9 @@ def _build_monitor(args: argparse.Namespace) -> CorrelatedMonitor:
     except Exception as exc:
         print(f"monitor: no FreshService client ({exc}); replay-only", file=sys.stderr)
     monitor = CorrelatedMonitor(cfg, client=client)
-    if cfg.report_webhook:
+    if cfg.report_hook_url and cfg.report_hook_token:
+        monitor.report_hook = hook_reporter(cfg.report_hook_url, cfg.report_hook_token)
+    elif cfg.report_webhook:
         monitor.report_hook = webhook_reporter(cfg.report_webhook)
     return monitor
 

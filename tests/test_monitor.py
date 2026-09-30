@@ -477,3 +477,33 @@ def test_webhook_reporter_payload(monkeypatch):
     hook(5, "app:engage", tickets, "note body")
     assert "teams.example" in captured["url"]
     assert "#5" in captured["text"] and "Engage" in captured["text"]
+
+
+def test_hook_reporter_sends_openclaw_protocol(monkeypatch):
+    import json as _json
+
+    seen = {}
+
+    class _Resp:
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _urlopen(req, timeout=30):
+        seen["url"] = req.full_url
+        seen["token"] = req.headers.get("X-openclaw-token")
+        seen["body"] = _json.loads(req.data.decode())
+        return _Resp()
+
+    monkeypatch.setattr(M.urllib.request, "urlopen", _urlopen)
+    hook = M.hook_reporter("http://axle:18789/hooks/axle-monitor", "tok123")
+    hook(7, "app:engage", [parse_ticket(t) for t in _synthetic(3)], "note body")
+    assert seen["url"].endswith("/hooks/axle-monitor")
+    assert seen["token"] == "tok123"
+    assert seen["body"]["alert_id"] == 7 and seen["body"]["cluster_key"] == "app:engage"
+    assert seen["body"]["count"] == 3

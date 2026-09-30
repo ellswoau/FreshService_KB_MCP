@@ -141,6 +141,9 @@ class Settings:
 
     # Phase 4 feedback loop
     monitor_report_webhook: Optional[str] = None   # Teams/other incoming webhook
+    monitor_report_hook_url: Optional[str] = None  # OpenClaw agent hook (via Axle)
+    monitor_report_hook_token: Optional[str] = None
+    monitor_api_token: Optional[str] = None        # gates the /feedback endpoint
     monitor_feedback_log: str = "feedback/events.jsonl"
 
     @classmethod
@@ -200,6 +203,9 @@ class Settings:
             monitor_use_fs_mcp_changes=_env_bool("MONITOR_USE_FS_MCP_CHANGES", True),
             monitor_saas_enabled=_env_bool("MONITOR_SAAS_ENABLED", True),
             monitor_report_webhook=_env("MONITOR_REPORT_WEBHOOK"),
+            monitor_report_hook_url=(_env("MONITOR_REPORT_HOOK_URL") or "").rstrip("/") or None,
+            monitor_report_hook_token=_env("MONITOR_REPORT_HOOK_TOKEN"),
+            monitor_api_token=_env("MONITOR_API_TOKEN"),
             monitor_feedback_log=_env("MONITOR_FEEDBACK_LOG", "feedback/events.jsonl") or "feedback/events.jsonl",
         )
 

@@ -86,6 +86,10 @@ services:
       # nowhere else -- no ticket bodies are duplicated.
       - fskb-monitor-state:/data
       - ./feedback:/app/feedback
+    ports:
+      # /health (public) + /feedback (bearer-gated) so the Axle agent can record
+      # accept/reject verdicts. Nothing else is exposed.
+      - "8016:8016"
     healthcheck:
       # The monitor is a worker (no bearer-gated network API), so liveness is a
       # credential-free /health on its local port.
