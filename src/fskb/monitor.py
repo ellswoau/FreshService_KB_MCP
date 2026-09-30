@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import html
 import json
 import os
 import re
@@ -644,29 +645,50 @@ class CorrelatedMonitor:
         self, key: str, tickets: Sequence[Ticket], now: datetime,
         evidence: Optional[CorroborationResult] = None,
     ) -> str:
+        """Compose the private note as FreshService HTML (NOT plain text).
+
+        FreshService renders note bodies as HTML, so this emits <p>/<b>/<i>/<ul>/<li>
+        rather than a flat string. Axle posts it verbatim (see the monitor-alert
+        hook template).
+        """
+
         label = label_for(key)
         syskeys = sorted({t.system_key for t in tickets})
-        lines = [
-            f"[correlated-ticket monitor] Possible incident cluster: {label} ({key})",
-            f"{len(tickets)} ticket(s) created within {self.cfg.window_minutes} min "
-            f"as of {iso(now)} (UTC).",
-            "",
-            "Tickets (oldest first):",
+        parts = [
+            f"<p><b>[correlated-ticket monitor] Possible incident cluster: "
+            f"{html.escape(label)} ({html.escape(key)})</b></p>",
+            f"<p>{len(tickets)} ticket(s) created within {self.cfg.window_minutes} min "
+            f"as of {iso(now)} (UTC).</p>",
+            "<p>Tickets (oldest first):</p>",
+            "<ul>",
         ]
         for t in tickets:
-            subj = (t.subject or "").strip().replace("\n", " ")[:90]
-            lines.append(f"  - #{t.id}  {iso(t.created_at)}  {subj}")
-        lines += [
-            "",
-            f"System key(s) seen: {', '.join(syskeys)}",
-            "Detection: description-text cluster match (category/sub_category not used for detection).",
-            "This is a heuristic cluster, not a confirmed incident. No tickets were merged;",
-            "verify against the live systems before acting.",
-        ]
+            subj = html.escape((t.subject or "").strip().replace("\n", " ")[:90])
+            parts.append(f"<li><b>#{t.id}</b> &mdash; {iso(t.created_at)} &mdash; {subj}</li>")
+        parts.append("</ul>")
+        parts.append(f"<p><b>System key(s):</b> {html.escape(', '.join(syskeys))}</p>")
+        parts.append(
+            "<p><i>Detection: description-text cluster match (category/sub_category not "
+            "used for detection). Heuristic cluster, not a confirmed incident. No tickets "
+            "were merged; verify against the live systems before acting.</i></p>"
+        )
         if evidence is not None:
-            lines.append("")
-            lines.extend(evidence.summary_lines())
-        return "\n".join(lines)
+            parts.append(
+                f"<p><b>Corroborators</b> &mdash; {html.escape(evidence.confidence)}:</p><ul>"
+            )
+            for r in evidence.results:
+                unit = "event" if r.count == 1 else "events"
+                extra = f" (prior window {r.prior_count})" if r.role == "effect" else ""
+                flag = " *" if (r.role == "effect" and r.elevated) else ""
+                parts.append(
+                    f"<li>[{html.escape(r.role)}] <b>{html.escape(r.key)}</b> @ "
+                    f"{html.escape(r.stream)}: {r.count} {unit}{extra}{flag}</li>"
+                )
+            parts.append("</ul>")
+            pools = evidence.pools()
+            if pools:
+                parts.append(f"<p><b>Pools seen:</b> {html.escape(', '.join(pools))}</p>")
+        return "".join(parts)
 
     # --- synthetic replay (verification / tests) ---
     def replay(self, tickets: Iterable[Dict[str, Any]], now: Optional[datetime] = None) -> List[int]:
