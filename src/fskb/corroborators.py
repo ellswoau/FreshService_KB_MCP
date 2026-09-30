@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import ssl
 import urllib.parse
 import urllib.request
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .mcp_client import MCPClient
+from .sanitize import strip_html
 
 UTC = timezone.utc
 
@@ -248,6 +250,54 @@ def _resolve_pool(mcp_client: Optional[MCPClient], pool_hint: Optional[str]) -> 
     return None
 
 
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+class MCPChangesClient:
+    """Adapts a house MCP server's ``list_changes`` to the changes-client API.
+
+    Prefer this when available: the FreshService MCP returns humanised labels
+    (status "Closed", risk "Low") the raw ``/api/v2/changes`` response lacks.
+    """
+
+    def __init__(self, mcp_client: MCPClient, per_page: int = 50):
+        self.mcp = mcp_client
+        self.per_page = per_page
+
+    def list_changes(self, updated_since: Optional[str] = None, limit: Optional[int] = None):
+        out: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            res = self.mcp.call_tool(
+                "list_changes",
+                {"updated_since": updated_since, "page": page, "per_page": self.per_page},
+            )
+            changes = res.get("changes", []) if isinstance(res, dict) else []
+            if not changes:
+                break
+            out.extend(changes)
+            if limit is not None and len(out) >= limit:
+                return out[:limit]
+            if len(changes) < self.per_page:
+                break
+            page += 1
+            if page > 90:
+                break
+        return out
+
+
 def corroborate_changes(
     changes_client: Any,
     window_start: datetime,
@@ -255,11 +305,16 @@ def corroborate_changes(
     lookback_hours: int = 72,
     keywords: Optional[List[str]] = None,
     limit: int = 6,
+    require_overlap: bool = True,
 ) -> SignalResult:
     """Recent FreshService changes = a CAUSE source (what changed, when, systems).
 
-    A change near the cluster that names an overlapping system is strong cause
-    evidence; ``mode='presence'`` (a matching change matters on its own).
+    Matching rules (per review):
+      (a) generic tokens are dropped upstream (:func:`monitor._cluster_keywords`);
+      (b) the change's PLANNED window must overlap the cluster window (a change
+          that ended hours before the cluster is not a credible cause here);
+      (c) ``impacted_services`` is preferred, but subject/description text is an
+          accepted fallback (impacted_services is often empty).
     """
 
     since = window_start - timedelta(hours=lookback_hours)
@@ -269,18 +324,32 @@ def corroborate_changes(
     total = 0
     for ch in changes_client.list_changes(updated_since=since_str):
         total += 1
-        text = " ".join(
-            str(ch.get(f) or "") for f in
-            ("subject", "description_text", "impacted_services", "category", "sub_category")
-        ).lower()
-        if kws and not any(k in text for k in kws):
-            continue
+        start = _parse_dt(ch.get("planned_start_date"))
+        end = _parse_dt(ch.get("planned_end_date")) or start
+        if require_overlap:
+            if start is None:
+                continue
+            if not (start <= window_end and end >= window_start):
+                continue
+        if kws:
+            impacted = ch.get("impacted_services") or []
+            impacted_text = (
+                " ".join(str(x) for x in impacted).lower()
+                if isinstance(impacted, list) else str(impacted).lower()
+            )
+            subject_text = " ".join(
+                str(ch.get(f) or "") for f in ("subject", "description_text")
+            ).lower()
+            if not ((impacted_text and any(k in impacted_text for k in kws))
+                    or any(k in subject_text for k in kws)):
+                continue
         matched.append(ch)
     samples = [
         {
             "id": c.get("id"),
             "subject": c.get("subject"),
             "status": c.get("status"),
+            "risk": c.get("risk"),
             "planned_start": c.get("planned_start_date"),
             "planned_end": c.get("planned_end_date"),
             "impacted": c.get("impacted_services"),
@@ -291,11 +360,67 @@ def corroborate_changes(
         key="change_feed",
         role="cause",
         stream="freshservice-changes",
-        query=f"changes updated_since {since_str}" + (f" keywords={kws}" if kws else ""),
+        query=f"changes updated_since {since_str}" + (f" overlap=[{window_start:%H:%M},{window_end:%H:%M}]" if require_overlap else ""),
         count=len(matched),
         samples=samples,
         mode="presence",
-        note="Recent FreshService changes (what/when/systems).",
+        note=f"Changes whose planned window overlaps the cluster (of {total} since {since_str}).",
+    )
+
+
+# --- SaaS vendor status (incidenthub.cloud status pages) -------------------
+_STATUS_RE = re.compile(r"status is (up|down|degraded|experiencing issues)", re.IGNORECASE)
+_CHECKED_RE = re.compile(r"Last checked ([0-9T:Z.\-]+)")
+_BAD_RE = re.compile(r"\b(outage|degraded|is down|experiencing issues|major outage)\b", re.IGNORECASE)
+
+
+def _http_get_text(url: str, timeout: int = 20) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "fskb-monitor/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def parse_status_text(text: str) -> Dict[str, Any]:
+    """Extract {status, checked} from an incidenthub status page's visible text."""
+
+    plain = strip_html(text)
+    m = _STATUS_RE.search(plain)
+    if m:
+        status = "up" if m.group(1).lower() == "up" else "issues"
+    else:
+        status = "issues" if _BAD_RE.search(plain) else "up"
+    c = _CHECKED_RE.search(plain)
+    return {"status": status, "checked": c.group(1) if c else None}
+
+
+def corroborate_saas_status(catalog: Dict[str, Any], timeout: int = 20) -> SignalResult:
+    """Check SaaS vendor status pages; a vendor NOT 'up' is a cause signal.
+
+    Scrapes the public status page text (no API key) -- per review.
+    """
+
+    pages = catalog.get("saas_status", []) or []
+    samples: List[Dict[str, Any]] = []
+    down = 0
+    for page in pages:
+        try:
+            text = _http_get_text(page["url"], timeout=timeout)
+            st = parse_status_text(text)
+        except Exception as exc:
+            samples.append({"vendor": page.get("vendor"), "status": "unreachable", "error": str(exc)[:80]})
+            continue
+        if st["status"] != "up":
+            down += 1
+        samples.append({"vendor": page.get("vendor"), "status": st["status"], "checked": st.get("checked")})
+    return SignalResult(
+        key="saas_status",
+        role="cause",
+        stream="incidenthub",
+        query="status pages: " + ", ".join(p.get("vendor", "?") for p in pages),
+        count=down,
+        samples=samples,
+        mode="presence",
+        note="SaaS vendor status (incidenthub.cloud). Only non-up vendors count.",
     )
 
 
@@ -312,6 +437,8 @@ def corroborate(
     changes_client: Any = None,
     change_lookback_hours: int = 72,
     keywords: Optional[List[str]] = None,
+    check_saas: bool = False,
+    saas_timeout: int = 20,
 ) -> CorroborationResult:
     """Run every catalog signal for a cluster window and score the evidence.
 
@@ -377,6 +504,15 @@ def corroborate(
             results.append(
                 SignalResult(key="change_feed", role="cause", stream="freshservice-changes",
                              query="changes", count=0, mode="presence", note=f"unavailable: {exc}")
+            )
+
+    if check_saas:
+        try:
+            results.append(corroborate_saas_status(catalog, timeout=saas_timeout))
+        except Exception as exc:  # evidence is best-effort
+            results.append(
+                SignalResult(key="saas_status", role="cause", stream="incidenthub",
+                             query="status pages", count=0, mode="presence", note=f"unavailable: {exc}")
             )
 
     cause_hit = any(r.role == "cause" and r.elevated for r in results)

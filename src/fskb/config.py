@@ -131,6 +131,14 @@ class Settings:
     monitor_change_enabled: bool = True
     monitor_change_lookback_hours: int = 72
 
+    # Prefer the FreshService MCP's list_changes (richer labels) when configured
+    freshservice_mcp_url: Optional[str] = None
+    freshservice_mcp_auth_token: Optional[str] = None
+    monitor_use_fs_mcp_changes: bool = True
+
+    # SaaS vendor status (incidenthub.cloud status pages, scraped)
+    monitor_saas_enabled: bool = True
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -183,6 +191,10 @@ class Settings:
             monitor_horizon_enabled=_env_bool("MONITOR_HORIZON_ENABLED", True),
             monitor_change_enabled=_env_bool("MONITOR_CHANGE_ENABLED", True),
             monitor_change_lookback_hours=_env_int("MONITOR_CHANGE_LOOKBACK_HOURS", 72),
+            freshservice_mcp_url=(_env("FRESHSERVICE_MCP_URL") or "").rstrip("/") or None,
+            freshservice_mcp_auth_token=_env("FRESHSERVICE_MCP_AUTH_TOKEN"),
+            monitor_use_fs_mcp_changes=_env_bool("MONITOR_USE_FS_MCP_CHANGES", True),
+            monitor_saas_enabled=_env_bool("MONITOR_SAAS_ENABLED", True),
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------

@@ -42,7 +42,7 @@ from zoneinfo import ZoneInfo
 
 from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
-from .corroborators import CorroborationResult, GraylogClient, corroborate, load_catalog
+from .corroborators import CorroborationResult, GraylogClient, MCPChangesClient, corroborate, load_catalog
 from .mcp_client import MCPClient
 
 # A report hook receives (alert_id, cluster_key, tickets, note_text) and returns
@@ -356,6 +356,10 @@ class MonitorConfig:
     horizon_mcp_verify_ssl: bool = True
     change_enabled: bool = True
     change_lookback_hours: int = 72
+    saas_enabled: bool = True
+    fs_mcp_url: Optional[str] = None
+    fs_mcp_auth_token: Optional[str] = None
+    use_fs_mcp_changes: bool = True
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MonitorConfig":
@@ -387,6 +391,10 @@ class MonitorConfig:
             horizon_mcp_verify_ssl=settings.horizon_mcp_verify_ssl,
             change_enabled=settings.monitor_change_enabled,
             change_lookback_hours=settings.monitor_change_lookback_hours,
+            saas_enabled=settings.monitor_saas_enabled,
+            fs_mcp_url=settings.freshservice_mcp_url,
+            fs_mcp_auth_token=settings.freshservice_mcp_auth_token,
+            use_fs_mcp_changes=settings.monitor_use_fs_mcp_changes,
         )
 
 
@@ -415,6 +423,13 @@ class CorrelatedMonitor:
         if config.horizon_enabled and config.horizon_mcp_url and config.horizon_mcp_auth_token:
             self.horizon_mcp = MCPClient(
                 config.horizon_mcp_url, config.horizon_mcp_auth_token, config.horizon_mcp_verify_ssl
+            )
+        # Change feed: prefer the FreshService MCP (humanised labels); fall back
+        # to the direct FreshService client (self.client) otherwise.
+        self.changes_client: Any = None
+        if config.use_fs_mcp_changes and config.fs_mcp_url and config.fs_mcp_auth_token:
+            self.changes_client = MCPChangesClient(
+                MCPClient(config.fs_mcp_url, config.fs_mcp_auth_token)
             )
 
     # --- ingestion ---
@@ -581,9 +596,10 @@ class CorrelatedMonitor:
                 limit=self.cfg.corroborate_limit,
                 mcp_client=self.horizon_mcp,
                 pool_hint=_pool_hint(tickets) if tickets else None,
-                changes_client=self.client if self.cfg.change_enabled else None,
+                changes_client=(self.changes_client or self.client) if self.cfg.change_enabled else None,
                 change_lookback_hours=self.cfg.change_lookback_hours,
                 keywords=_cluster_keywords(key, tickets),
+                check_saas=self.cfg.saas_enabled,
             )
         except Exception as exc:  # evidence is best-effort; never lose the alert
             self.emit(f"[corroborate] error: {exc}")
@@ -652,7 +668,12 @@ def _indent(text: str, prefix: str = "    ") -> str:
 
 
 _POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
-_STOPWORDS = {"with", "from", "that", "this", "cannot", "issue", "issues", "other", "desktop", "account", "error", "errors"}
+_STOPWORDS = {
+    "with", "from", "that", "this", "cannot", "issue", "issues", "other", "desktop",
+    "account", "error", "errors", "change", "changes", "standard", "update", "updates",
+    "service", "services", "store", "stores", "primary", "secondary", "emergency",
+    "normal", "routine", "unknown", "cannot", "won't", "doesn't",
+}
 
 
 def _cluster_keywords(key: Optional[str], tickets: Optional[Sequence[Ticket]]) -> List[str]:

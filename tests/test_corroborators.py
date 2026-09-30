@@ -180,30 +180,73 @@ class _FakeChanges:
         return iter(self.changes)
 
 
-def test_change_feed_matches_cluster_keywords():
-    changes = [
-        {"id": 1, "subject": "Standard Change: Updating Conditional Access store IP addresses",
-         "impacted_services": ["Azure AD"], "planned_start_date": "2026-09-29T04:00:00Z"},
-        {"id": 2, "subject": "Printer firmware refresh", "impacted_services": ["Printers"]},
-    ]
-    sig = C.corroborate_changes(_FakeChanges(changes), NOW - timedelta(minutes=60), NOW,
-                                keywords=["conditional", "access"])
-    assert sig.role == "cause" and sig.mode == "presence"
+def _ch(cid, subject, start, end, impacted=None):
+    return {"id": cid, "subject": subject, "planned_start_date": start,
+            "planned_end_date": end, "impacted_services": impacted or []}
+
+
+_IN = "2026-09-30T11:45:00Z"      # overlaps the [11:00,12:00] cluster window
+_OUT = "2026-09-30T12:30:00Z"
+_PAST_S, _PAST_E = "2026-09-29T04:00:00Z", "2026-09-29T04:30:00Z"
+
+
+def test_change_requires_planned_window_overlap():
+    inwin = _ch(1, "Change affecting Engage", _IN, _OUT, ["Engage"])
+    past = _ch(2, "Change affecting Engage", _PAST_S, _PAST_E, ["Engage"])
+    sig = C.corroborate_changes(_FakeChanges([inwin, past]), NOW - timedelta(minutes=60), NOW,
+                                keywords=["engage"])
     assert sig.count == 1 and sig.samples[0]["id"] == 1
-    assert sig.elevated is True
 
 
-def test_change_feed_without_keywords_counts_all():
-    changes = [{"id": 1, "subject": "a"}, {"id": 2, "subject": "b"}]
+def test_change_prefers_impacted_services_with_subject_fallback():
+    by_impact = _ch(1, "Routine maintenance", _IN, _OUT, ["Engage"])
+    by_subject = _ch(2, "Updating Engage servers", _IN, _OUT, [])
+    none = _ch(3, "Printer firmware", _IN, _OUT, [])
+    sig = C.corroborate_changes(_FakeChanges([by_impact, by_subject, none]),
+                                NOW - timedelta(minutes=60), NOW, keywords=["engage"])
+    assert {s["id"] for s in sig.samples} == {1, 2}
+
+
+def test_change_without_keywords_counts_all_in_window():
+    changes = [_ch(1, "a", _IN, _OUT), _ch(2, "b", _IN, _OUT)]
     sig = C.corroborate_changes(_FakeChanges(changes), NOW - timedelta(minutes=60), NOW)
     assert sig.count == 2
 
 
+def test_change_overlap_can_be_disabled():
+    past = _ch(2, "Old change", _PAST_S, _PAST_E, ["Engage"])
+    sig = C.corroborate_changes(_FakeChanges([past]), NOW - timedelta(minutes=60), NOW,
+                                keywords=["engage"], require_overlap=False)
+    assert sig.count == 1
+
+
 def test_corroborate_includes_change_signal_when_client_present():
-    changes = _FakeChanges([{"id": 9, "subject": "Change affecting Engage", "impacted_services": ["Engage"]}])
+    changes = _FakeChanges([_ch(9, "Change affecting Engage", _IN, _OUT, ["Engage"])])
     res = C.corroborate(_FakeGraylog(cause=0, effect=0), C.load_catalog(),
                         NOW - timedelta(minutes=60), NOW, changes_client=changes,
                         keywords=["engage"])
     sig = [r for r in res.results if r.key == "change_feed"][0]
     assert sig.count == 1
     assert res.confidence == C.CONF_CONSISTENT  # cause present, no effect
+
+
+# --- SaaS status scraping --------------------------------------------------
+def test_parse_status_text_up_and_issues():
+    up = C.parse_status_text("Microsoft 365 status is up Last checked 2026-09-30T13:30:00.000Z")
+    assert up["status"] == "up" and up["checked"].startswith("2026-09-30T13:30")
+    bad = C.parse_status_text("RingCentral status is down")
+    assert bad["status"] == "issues"
+    html = "<div>Microsoft 365 status is up</div>"
+    assert C.parse_status_text(html)["status"] == "up"
+
+
+def test_saas_status_counts_non_up_vendors(monkeypatch):
+    cat = {"saas_status": [
+        {"vendor": "Microsoft 365", "url": "http://x/m365"},
+        {"vendor": "Cloudflare", "url": "http://x/cf"},
+    ]}
+    bodies = {"http://x/m365": "Microsoft 365 status is up", "http://x/cf": "Cloudflare status is down"}
+    monkeypatch.setattr(C, "_http_get_text", lambda url, timeout=20: bodies[url])
+    sig = C.corroborate_saas_status(cat)
+    assert sig.count == 1
+    assert {s["vendor"] for s in sig.samples if s["status"] != "up"} == {"Cloudflare"}

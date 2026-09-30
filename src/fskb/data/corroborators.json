@@ -79,5 +79,12 @@
       "event": "AGENT_RECONFIGURED",
       "why": "~3,300/day; never a trigger or corroborator"
     }
+  ],
+  "saas_status": [
+    {"vendor": "Microsoft 365", "url": "https://incidenthub.cloud/status/microsoft-365"},
+    {"vendor": "RingCentral", "url": "https://incidenthub.cloud/status/ringcentral"},
+    {"vendor": "Microsoft Azure", "url": "https://incidenthub.cloud/status/microsoft-azure"},
+    {"vendor": "Cloudflare", "url": "https://incidenthub.cloud/status/cloudflare"},
+    {"vendor": "Google Cloud Platform", "url": "https://incidenthub.cloud/status/google-cloud-platform"}
   ]
 }
