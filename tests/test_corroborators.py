@@ -142,3 +142,30 @@ def test_pool_errors_are_scoped_to_the_cluster_pool():
     assert sig.count == 0 and sig.elevated is False
     # cause present, no aligned effect -> only "consistent with"
     assert res.confidence == C.CONF_CONSISTENT
+
+
+def test_horizon_queries_are_scoped_to_resolved_pool():
+    seen = []
+
+    class _G:
+        def search(self, stream_id, query, frm, to, limit=10):
+            seen.append(query)
+            return {"total_results": 0, "messages": []}
+
+    mcp = _FakeMCP([{"name": "man2-vdi", "display_name": "GR Manufacturing Pool", "error_count": 0}])
+    C.corroborate(_G(), C.load_catalog(), NOW - timedelta(minutes=60), NOW,
+                  mcp_client=mcp, pool_hint="man2")
+    # every Horizon-stream query must carry the pool filter
+    assert seen and all('View@6876_DesktopId:"man2-vdi"' in q for q in seen)
+
+
+def test_no_pool_hint_leaves_queries_global():
+    seen = []
+
+    class _G:
+        def search(self, stream_id, query, frm, to, limit=10):
+            seen.append(query)
+            return {"total_results": 0, "messages": []}
+
+    C.corroborate(_G(), C.load_catalog(), NOW - timedelta(minutes=60), NOW)
+    assert seen and not any("DesktopId" in q for q in seen)

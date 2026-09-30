@@ -232,6 +232,22 @@ def corroborate_horizon_pools(mcp_client: MCPClient, pool_hint: Optional[str] = 
     )
 
 
+def _resolve_pool(mcp_client: Optional[MCPClient], pool_hint: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Map a site-code hint (``man2``) to a Horizon pool record (name ``man2-vdi``)."""
+
+    if not mcp_client or not pool_hint:
+        return None
+    try:
+        status = mcp_client.call_tool("desktop_pool_status", {})
+    except Exception:
+        return None
+    hint = pool_hint.lower()
+    for p in status.get("pools", []) or []:
+        if hint in f"{p.get('name', '')} {p.get('display_name') or ''}".lower():
+            return p
+    return None
+
+
 def corroborate(
     client: GraylogClient,
     catalog: Dict[str, Any],
@@ -243,7 +259,18 @@ def corroborate(
     mcp_client: Optional[MCPClient] = None,
     pool_hint: Optional[str] = None,
 ) -> CorroborationResult:
-    """Run every catalog signal for a cluster window and score the evidence."""
+    """Run every catalog signal for a cluster window and score the evidence.
+
+    When a machine hint resolves to a Horizon pool, the Horizon-stream queries
+    are SCOPED to that pool (``View@6876_DesktopId:"<pool>"``) so a change or an
+    error burst on an unrelated pool cannot corroborate this cluster.
+    """
+
+    pool = _resolve_pool(mcp_client, pool_hint)
+    scope = ""
+    if pool:
+        did = catalog.get("fields", {}).get("horizon", {}).get("desktop_id", "View@6876_DesktopId")
+        scope = f' AND {did}:"{pool["name"]}"'
 
     results: List[SignalResult] = []
     for sig in catalog.get("signals", []):
@@ -253,7 +280,8 @@ def corroborate(
         lookback = cause_lookback_hours if role == "cause" else effect_lookback_hours
         frm = window_start - timedelta(hours=lookback)
         to = window_end
-        query = " OR ".join(sig["any"])
+        base_query = " OR ".join(sig["any"])
+        query = f"({base_query}){scope}" if (scope and stream_key == "horizon") else base_query
         # Effect signals need a big enough sample to count pools; keep only
         # ``limit`` for the note.
         fetch = max(limit, 300) if role == "effect" else limit
