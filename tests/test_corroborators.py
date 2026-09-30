@@ -254,6 +254,16 @@ def test_parse_status_banner_experiencing_issues():
     assert C.parse_status_text(html)["status"] == "issues"
 
 
+def test_parse_status_handles_nextjs_comment_and_datetime():
+    html = (
+        '<h2 class="x">Microsoft 365<!-- --> status is up</h2>'
+        '<div>Last checked <time id="lastChecked" dateTime="2026-09-30T13:30:00.000Z">x</time></div>'
+    )
+    out = C.parse_status_text(html)
+    assert out["status"] == "up"
+    assert out["checked"] == "2026-09-30T13:30:00.000Z"
+
+
 def test_parse_status_unknown_without_a_phrase():
     assert C.parse_status_text("<h2>Some Vendor</h2><p>welcome</p>")["status"] == "unknown"
 

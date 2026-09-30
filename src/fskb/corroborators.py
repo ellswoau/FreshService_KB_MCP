@@ -372,6 +372,12 @@ def corroborate_changes(
 # The status banner is an <h1>/<h2>: "<Vendor> status is up" / "<Vendor> is
 # experiencing issues". Match the BANNER, never the FAQ/history prose (which
 # contains phrases like "is experiencing an outage?" and "reported N outages").
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+# The status banner is an <h1>/<h2>: "<Vendor> status is up" / "<Vendor> is
+# experiencing issues". Match the BANNER, never the FAQ/history prose (which
+# contains phrases like "is experiencing an outage?" and "reported N outages").
+# NOTE: Next.js inserts HTML comments between text nodes ("Vendor<!-- --> status
+# is up"), so comments are stripped before matching.
 _BANNER_RE = re.compile(
     r"<h[12][^>]*>[^<]*?"
     r"(?:status is (up|down|degraded)|is experiencing "
@@ -383,7 +389,9 @@ _STATUS_LINE_RE = re.compile(r"status is (up|down|degraded)", re.IGNORECASE)
 _EXP_RE = re.compile(
     r"is experiencing (issues|an outage|degraded|service degradation)(?!\?)", re.IGNORECASE
 )
-_CHECKED_RE = re.compile(r"Last checked[:\s]*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)")
+# "Last checked" lives in <time id="lastChecked" dateTime="...">.
+_CHECKED_RE = re.compile(r"<time[^>]*dateTime=\"([^\"]+)\"", re.IGNORECASE)
+_PLAIN_CHECKED_RE = re.compile(r"Last checked[:\s]*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)")
 
 
 def _status_from_segment(segment: str) -> str:
@@ -403,14 +411,14 @@ def parse_status_text(text: str, vendor: Optional[str] = None) -> Dict[str, Any]
     Returns ``unknown`` rather than guessing when no status phrase is present.
     """
 
+    clean = _COMMENT_RE.sub("", text)
     status = "unknown"
-    banner = _BANNER_RE.search(text)
+    banner = _BANNER_RE.search(clean)
     if banner:
         status = _status_from_segment(strip_html(banner.group(0)))
     if status == "unknown":
-        head = strip_html(text)[:400]
-        status = _status_from_segment(head)
-    c = _CHECKED_RE.search(text)
+        status = _status_from_segment(strip_html(clean)[:400])
+    c = _CHECKED_RE.search(clean) or _PLAIN_CHECKED_RE.search(clean)
     return {"status": status, "checked": c.group(1) if c else None}
 
 
