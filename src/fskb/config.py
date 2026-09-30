@@ -139,6 +139,10 @@ class Settings:
     # SaaS vendor status (incidenthub.cloud status pages, scraped)
     monitor_saas_enabled: bool = True
 
+    # Phase 4 feedback loop
+    monitor_report_webhook: Optional[str] = None   # Teams/other incoming webhook
+    monitor_feedback_log: str = "feedback/events.jsonl"
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -195,6 +199,8 @@ class Settings:
             freshservice_mcp_auth_token=_env("FRESHSERVICE_MCP_AUTH_TOKEN"),
             monitor_use_fs_mcp_changes=_env_bool("MONITOR_USE_FS_MCP_CHANGES", True),
             monitor_saas_enabled=_env_bool("MONITOR_SAAS_ENABLED", True),
+            monitor_report_webhook=_env("MONITOR_REPORT_WEBHOOK"),
+            monitor_feedback_log=_env("MONITOR_FEEDBACK_LOG", "feedback/events.jsonl") or "feedback/events.jsonl",
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------

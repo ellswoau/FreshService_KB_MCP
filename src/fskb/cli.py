@@ -264,6 +264,12 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
     return cmd_baseline(args)
 
 
+def _cmd_monitor_feedback(args: argparse.Namespace) -> int:
+    from .monitor import cmd_monitor_feedback
+
+    return cmd_monitor_feedback(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fskb", description="FreshService -> Azure AI Search KB")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -355,6 +361,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="compute but do not write")
     p.add_argument("--db", default=None, help="SQLite path (default MONITOR_DB_PATH)")
     p.set_defaults(func=_cmd_baseline)
+
+    p = sub.add_parser("monitor-feedback", help="record a verdict on a monitor alert")
+    p.add_argument("--alert-id", dest="alert_id", type=int, required=True)
+    p.add_argument("--verdict", required=True, choices=["accept", "reject", "unsure"])
+    p.add_argument("--agent", default=None)
+    p.add_argument("--note", default=None)
+    p.add_argument("--cluster-key", dest="cluster_key", default=None)
+    p.add_argument("--close", action="store_true", help="also close the alert (accept/reject)")
+    p.add_argument("--db", default=None, help="SQLite path (default MONITOR_DB_PATH)")
+    p.add_argument("--log", default=None, help="feedback JSONL (default MONITOR_FEEDBACK_LOG)")
+    p.set_defaults(func=_cmd_monitor_feedback)
 
     p = sub.add_parser("status", help="redacted config + index count")
     p.set_defaults(func=cmd_status)

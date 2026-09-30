@@ -33,6 +33,7 @@ import sqlite3
 import statistics
 import sys
 import threading
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,7 @@ from zoneinfo import ZoneInfo
 from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
 from .corroborators import CorroborationResult, GraylogClient, MCPChangesClient, corroborate, load_catalog
+from .feedback import log_cluster_verdict
 from .mcp_client import MCPClient
 
 # A report hook receives (alert_id, cluster_key, tickets, note_text) and returns
@@ -310,6 +312,21 @@ class ClusterStore:
         self.conn.execute("UPDATE alert SET status=? WHERE id=?", (status, alert_id))
         self.conn.commit()
 
+    def close_expired_alerts(self, now: datetime) -> int:
+        """Close open alerts whose cooldown has elapsed without a re-fire.
+
+        'The cluster subsided': the incident never grew past its cooldown, so the
+        alert is done. Returns how many were closed.
+        """
+
+        cur = self.conn.execute(
+            "UPDATE alert SET status='closed' WHERE status='open' "
+            "AND cooldown_until IS NOT NULL AND cooldown_until < ?",
+            (iso(now),),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     # --- feedback ---
     def record_feedback(self, alert_id: int, verdict: str, agent: Optional[str], note: Optional[str]) -> None:
         self.conn.execute(
@@ -360,6 +377,8 @@ class MonitorConfig:
     fs_mcp_url: Optional[str] = None
     fs_mcp_auth_token: Optional[str] = None
     use_fs_mcp_changes: bool = True
+    report_webhook: Optional[str] = None
+    feedback_log: str = "feedback/events.jsonl"
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MonitorConfig":
@@ -395,6 +414,8 @@ class MonitorConfig:
             fs_mcp_url=settings.freshservice_mcp_url,
             fs_mcp_auth_token=settings.freshservice_mcp_auth_token,
             use_fs_mcp_changes=settings.monitor_use_fs_mcp_changes,
+            report_webhook=settings.monitor_report_webhook,
+            feedback_log=settings.monitor_feedback_log,
         )
 
 
@@ -463,10 +484,11 @@ class CorrelatedMonitor:
             # the window and alert cooldown make reprocessing idempotent.
             self.store.set_meta("created_watermark", iso(newest - timedelta(minutes=2)))
         self.store.heartbeat(now)
+        closed = self.store.close_expired_alerts(now)
         alert_ids = self.evaluate(now)
         self.emit(
             f"[poll] now={iso(now)} fetched={len(raw_tickets)} "
-            f"keys={len(self.window.keys())} alerts={alert_ids}"
+            f"keys={len(self.window.keys())} alerts={alert_ids} closed={closed}"
         )
         return alert_ids
 
@@ -667,6 +689,30 @@ def _indent(text: str, prefix: str = "    ") -> str:
     return "\n".join(prefix + ln for ln in text.splitlines())
 
 
+def _post_webhook(url: str, text: str, timeout: int = 10) -> None:
+    """POST a message to an incoming webhook (Teams/Slack-style {"text": ...})."""
+
+    data = json.dumps({"text": text}).encode()
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        resp.read()
+
+
+def webhook_reporter(url: str, timeout: int = 10):
+    """Build a report hook that posts the alert (with its id, for verdicts)."""
+
+    def _hook(alert_id: int, key: str, tickets: List[Ticket], note: str) -> None:
+        header = (
+            f"Correlated-ticket monitor alert #{alert_id}: {label_for(key)} "
+            f"({len(tickets)} tickets)"
+        )
+        _post_webhook(url, f"{header}\n\n{note}", timeout)
+
+    return _hook
+
+
 _POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
 _STOPWORDS = {
     "with", "from", "that", "this", "cannot", "issue", "issues", "other", "desktop",
@@ -838,7 +884,10 @@ def _build_monitor(args: argparse.Namespace) -> CorrelatedMonitor:
         client = FreshServiceClient(settings)
     except Exception as exc:
         print(f"monitor: no FreshService client ({exc}); replay-only", file=sys.stderr)
-    return CorrelatedMonitor(cfg, client=client)
+    monitor = CorrelatedMonitor(cfg, client=client)
+    if cfg.report_webhook:
+        monitor.report_hook = webhook_reporter(cfg.report_webhook)
+    return monitor
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
@@ -872,6 +921,19 @@ def cmd_baseline(args: argparse.Namespace) -> int:
     monitor = _build_monitor(args)
     rows, tickets = monitor.run_baseline()
     print(f"baseline: {rows} row(s) from {tickets} ticket(s)")
+    return 0
+
+
+def cmd_monitor_feedback(args: argparse.Namespace) -> int:
+    """Record a human verdict on an alert (writes the DB + the shared JSONL)."""
+
+    monitor = _build_monitor(args)
+    monitor.store.record_feedback(args.alert_id, args.verdict, args.agent, args.note)
+    if args.close and args.verdict in ("accept", "reject"):
+        monitor.store.set_status(args.alert_id, "closed")
+    log_path = Path(getattr(args, "log", None) or monitor.cfg.feedback_log)
+    log_cluster_verdict(log_path, args.alert_id, args.verdict, args.agent, args.note, args.cluster_key)
+    print(f"feedback recorded: alert={args.alert_id} verdict={args.verdict} -> {log_path}")
     return 0
 
 

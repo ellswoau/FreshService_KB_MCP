@@ -34,14 +34,20 @@ from typing import Dict, List, Optional
 
 @dataclass
 class FeedbackEvent:
-    ticket_id: int
-    suggested_ticket_id: int
+    # Retrieval feedback (kind="retrieval")
+    ticket_id: Optional[int] = None
+    suggested_ticket_id: Optional[int] = None
     rank: Optional[int] = None
     accepted: bool = False
     resolved: Optional[bool] = None
     agent: Optional[str] = None
     note: Optional[str] = None
     at: Optional[str] = None
+    # Cluster feedback (kind="cluster") - the correlated-ticket monitor's verdict
+    kind: str = "retrieval"            # retrieval | cluster
+    alert_id: Optional[int] = None
+    verdict: Optional[str] = None      # accept | reject | unsure
+    cluster_key: Optional[str] = None
 
     def finalize(self) -> "FeedbackEvent":
         if self.at is None:
@@ -64,6 +70,23 @@ def log_event(path: Path, event: FeedbackEvent) -> None:
         fh.write(json.dumps(asdict(event.finalize()), ensure_ascii=False) + "\n")
 
 
+def log_cluster_verdict(
+    path: Path, alert_id: int, verdict: str, agent: Optional[str] = None,
+    note: Optional[str] = None, cluster_key: Optional[str] = None,
+) -> None:
+    """Record a human verdict (accept/reject/unsure) on a monitor alert.
+
+    Shares the feedback JSONL with retrieval feedback (``kind="cluster"``) so
+    there is one loop; retrieval aggregation ignores these rows.
+    """
+
+    log_event(
+        path,
+        FeedbackEvent(kind="cluster", alert_id=alert_id, verdict=verdict,
+                      agent=agent, note=note, cluster_key=cluster_key),
+    )
+
+
 def read_events(path: Path) -> List[FeedbackEvent]:
     path = Path(path)
     if not path.exists():
@@ -77,14 +100,18 @@ def read_events(path: Path) -> List[FeedbackEvent]:
             raw = json.loads(line)
             events.append(
                 FeedbackEvent(
-                    ticket_id=int(raw["ticket_id"]),
-                    suggested_ticket_id=int(raw["suggested_ticket_id"]),
+                    ticket_id=raw.get("ticket_id"),
+                    suggested_ticket_id=raw.get("suggested_ticket_id"),
                     rank=raw.get("rank"),
                     accepted=bool(raw.get("accepted", False)),
                     resolved=raw.get("resolved"),
                     agent=raw.get("agent"),
                     note=raw.get("note"),
                     at=raw.get("at"),
+                    kind=raw.get("kind", "retrieval"),
+                    alert_id=raw.get("alert_id"),
+                    verdict=raw.get("verdict"),
+                    cluster_key=raw.get("cluster_key"),
                 )
             )
     return events
@@ -114,6 +141,8 @@ def summarize(path: Path) -> Dict[int, SuggestionStats]:
 
     latest: Dict[tuple, FeedbackEvent] = {}
     for event in read_events(path):
+        if event.kind != "retrieval":
+            continue  # cluster verdicts are not retrieval suggestions
         latest[(event.ticket_id, event.suggested_ticket_id)] = event
 
     stats: Dict[int, SuggestionStats] = {}

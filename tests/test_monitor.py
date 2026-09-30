@@ -447,3 +447,33 @@ def test_alert_evidence_includes_horizon_pool_errors(tmp_path):
         "SELECT evidence FROM alert WHERE id=?", (fired[0],)).fetchone()["evidence"])
     assert any(s["key"] == "vdi.pool_errors" for s in ev["signals"])
     assert any("vdi.pool_errors" in ln for ln in lines)
+
+
+# --- Phase 4: lifecycle + verdict feedback ---------------------------------
+def test_close_expired_alerts(tmp_path):
+    s = ClusterStore(tmp_path / "m.sqlite")
+    s.record_alert("app:engage", 1, T0, 3, T0 + timedelta(minutes=120))
+    assert s.close_expired_alerts(T0 + timedelta(minutes=60)) == 0
+    assert s.close_expired_alerts(T0 + timedelta(minutes=121)) == 1
+    assert s.latest_alert("app:engage")["status"] == "closed"
+    s.close()
+
+
+def test_cluster_verdict_logged_and_ignored_by_retrieval(tmp_path):
+    from fskb.feedback import log_cluster_verdict, read_events, summarize
+
+    p = tmp_path / "events.jsonl"
+    log_cluster_verdict(p, 7, "accept", "Axle", "real VDI push", "app:engage")
+    evs = read_events(p)
+    assert evs[0].kind == "cluster" and evs[0].alert_id == 7 and evs[0].verdict == "accept"
+    assert summarize(p) == {}  # cluster rows must not pollute retrieval stats
+
+
+def test_webhook_reporter_payload(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(M, "_post_webhook", lambda url, text, timeout=10: captured.update(url=url, text=text))
+    hook = M.webhook_reporter("http://teams.example/hook")
+    tickets = [parse_ticket(t) for t in _synthetic(3)]
+    hook(5, "app:engage", tickets, "note body")
+    assert "teams.example" in captured["url"]
+    assert "#5" in captured["text"] and "Engage" in captured["text"]
