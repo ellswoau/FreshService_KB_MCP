@@ -861,6 +861,31 @@ def compute_baseline_rows(
 # --------------------------------------------------------------------------- #
 # health endpoint (stdlib; credential-free, mirrors the house /health)
 # --------------------------------------------------------------------------- #
+def record_verdict(
+    db_path, feedback_log, alert_id, verdict, agent=None, note=None,
+    cluster_key=None, close=False,
+) -> None:
+    """Record a verdict using its OWN short-lived connection.
+
+    Called from the HTTP /feedback thread: a sqlite3 connection may only be used
+    from the thread that created it, so the shared poll-thread connection cannot
+    be reused here.
+    """
+
+    con = sqlite3.connect(str(db_path), timeout=15)
+    try:
+        con.execute(
+            "INSERT INTO feedback(alert_id, verdict, agent, note, at) VALUES(?,?,?,?,?)",
+            (alert_id, verdict, agent, note, iso(utcnow())),
+        )
+        if close and verdict in ("accept", "reject"):
+            con.execute("UPDATE alert SET status='closed' WHERE id=?", (alert_id,))
+        con.commit()
+    finally:
+        con.close()
+    log_cluster_verdict(Path(feedback_log), alert_id, verdict, agent, note, cluster_key)
+
+
 def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port: int = 8016):
     if port <= 0:
         return None
@@ -901,12 +926,10 @@ def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port:
             except Exception as exc:
                 self._json(400, {"error": f"bad request: {exc}"})
                 return
-            monitor.store.record_feedback(alert_id, verdict, payload.get("agent"), payload.get("note"))
-            if payload.get("close") and verdict in ("accept", "reject"):
-                monitor.store.set_status(alert_id, "closed")
-            log_cluster_verdict(
-                Path(monitor.cfg.feedback_log), alert_id, verdict,
+            record_verdict(
+                monitor.store.path, monitor.cfg.feedback_log, alert_id, verdict,
                 payload.get("agent"), payload.get("note"), payload.get("cluster_key"),
+                bool(payload.get("close")),
             )
             self._json(200, {"ok": True, "alert_id": alert_id, "verdict": verdict})
 
