@@ -154,10 +154,14 @@ class CorroborationResult:
             lines.append(f"  pools seen: {', '.join(pools)}")
         if self.pool_hint:
             hint = self.pool_hint.lower()
-            aligned = [p for p in pools if hint in (p or "").lower()]
+            aligned: List[str] = []
+            for r in self.results:
+                for s in r.samples:
+                    for cand in (s.get("name"), s.get("pool")):
+                        if cand and hint in str(cand).lower() and cand not in aligned:
+                            aligned.append(cand)
             lines.append(
-                f"  cluster machine hint '{self.pool_hint}' -> \
-"
+                f"  cluster machine hint '{self.pool_hint}' -> "
                 f"aligned pool(s): {', '.join(aligned) if aligned else 'none matched'}"
             )
         lines.append("  (independent systems; cause window widened, clocks aligned to UTC)")
@@ -187,10 +191,22 @@ def corroborate_horizon_pools(mcp_client: MCPClient, pool_hint: Optional[str] = 
 
     A pool in an ERROR state when it is normally 0 is meaningful on PRESENCE, so
     this signal uses ``mode='presence'`` (unlike the high-volume Graylog effect).
+
+    When ``pool_hint`` is given (a ticket named a machine on some pool), the
+    signal is SCOPED to that pool: an ERROR burst on a *different* pool must not
+    corroborate this cluster. If no pool matches the hint, the count is 0.
     """
 
     status = mcp_client.call_tool("desktop_pool_status", {})
     pools = status.get("pools", []) or []
+    note = "Horizon pool cloning/ERROR state (current); normally 0."
+    if pool_hint:
+        hint = pool_hint.lower()
+        pools = [
+            p for p in pools
+            if hint in f"{p.get('name', '')} {p.get('display_name') or ''}".lower()
+        ]
+        note += f" Scoped to cluster pool hint '{pool_hint}'."
     samples: List[Dict[str, Any]] = []
     total = 0
     for p in pools:
@@ -212,7 +228,7 @@ def corroborate_horizon_pools(mcp_client: MCPClient, pool_hint: Optional[str] = 
         count=total,
         samples=samples,
         mode="presence",
-        note="Horizon pool cloning/ERROR state (current); normally 0.",
+        note=note,
     )
 
 

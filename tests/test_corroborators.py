@@ -128,3 +128,17 @@ def test_horizon_unavailable_is_not_fatal():
     sig = [r for r in res.results if r.key == "vdi.pool_errors"][0]
     assert sig.count == 0  # degraded, but the alert still scores on Graylog
     assert res.confidence == C.CONF_LIKELY
+
+
+def test_pool_errors_are_scoped_to_the_cluster_pool():
+    # Errors on a DIFFERENT pool must NOT corroborate this cluster's pool.
+    mcp = _FakeMCP([
+        {"name": "man2-vdi", "display_name": "GR Manufacturing Pool", "error_count": 0},
+        {"name": "bos1-vdi", "display_name": "GR Office and Sales Pool", "error_count": 13},
+    ])
+    res = C.corroborate(_FakeGraylog(cause=1, effect=0), C.load_catalog(),
+                        NOW - timedelta(minutes=60), NOW, mcp_client=mcp, pool_hint="man2")
+    sig = [r for r in res.results if r.key == "vdi.pool_errors"][0]
+    assert sig.count == 0 and sig.elevated is False
+    # cause present, no aligned effect -> only "consistent with"
+    assert res.confidence == C.CONF_CONSISTENT
