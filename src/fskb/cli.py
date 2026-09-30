@@ -6,6 +6,7 @@ Commands:
   index        full run: extract -> embed -> push (incremental by watermark)
   query        hybrid lookup against the KB
   reconcile    soft-delete index docs for tickets no longer resolved/closed
+  monitor      correlated-ticket open-rate monitor (live cluster counter)
   status       print redacted config + index doc count
 """
 
@@ -250,6 +251,13 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_monitor(args: argparse.Namespace) -> int:
+    # Imported lazily so the package stays import-safe without the monitor deps.
+    from .monitor import cmd_monitor
+
+    return cmd_monitor(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fskb", description="FreshService -> Azure AI Search KB")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -319,6 +327,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", default="feedback/events.jsonl")
     p.add_argument("--boost-out", default=None, help="write the boost table here")
     p.set_defaults(func=cmd_feedback)
+
+    p = sub.add_parser("monitor", help="correlated-ticket monitor: cluster newly-created tickets")
+    p.add_argument("--once", action="store_true", help="single poll, then exit")
+    p.add_argument("--loop", action="store_true", help="run the polling loop (default)")
+    p.add_argument("--dry-run", action="store_true", help="compose alerts/notes but do not post")
+    p.add_argument("--replay-jsonl", dest="replay_jsonl", default=None,
+                   help="feed synthetic tickets from a JSONL file (offline verification)")
+    p.add_argument("--now", default=None, help="ISO timestamp to treat as 'now' for replay")
+    p.add_argument("--db", default=None, help="SQLite path (default MONITOR_DB_PATH)")
+    p.add_argument("--window", type=int, default=None, help="cluster window minutes")
+    p.add_argument("--min-count", dest="min_count", type=int, default=None,
+                   help="tickets required to fire a cluster")
+    p.add_argument("--cooldown", type=int, default=None, help="cooldown minutes per cluster key")
+    p.add_argument("--interval", type=int, default=None, help="loop interval seconds")
+    p.add_argument("--health-port", dest="health_port", type=int, default=None,
+                   help="HTTP /health port (0 disables)")
+    p.set_defaults(func=_cmd_monitor)
 
     p = sub.add_parser("status", help="redacted config + index count")
     p.set_defaults(func=cmd_status)

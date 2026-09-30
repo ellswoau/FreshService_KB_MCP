@@ -66,5 +66,35 @@ services:
       retries: 3
       start_period: 20s
 
+  # Correlated-ticket monitor: watches newly-created tickets, fires when a
+  # cluster (>= MONITOR_MIN_COUNT sharing a description-text cluster key within
+  # MONITOR_WINDOW_MINUTES) appears, leaves a PRIVATE note on the first ticket.
+  # Separate state volume: this process is the sole writer of monitor.sqlite.
+  monitor:
+    build: .
+    image: freshservice-kb:latest
+    container_name: freshservice-kb-monitor
+    restart: unless-stopped
+    command: ["fskb", "monitor", "--loop"]
+    env_file: .env
+    environment:
+      MONITOR_DB_PATH: /data/monitor.sqlite
+      MONITOR_HEALTH_PORT: "8016"
+      MONITOR_DRY_RUN: "${MONITOR_DRY_RUN:-false}"
+    volumes:
+      # monitor.sqlite (alerts, cooldowns, feedback, baseline) lives here and
+      # nowhere else -- no ticket bodies are duplicated.
+      - fskb-monitor-state:/data
+      - ./feedback:/app/feedback
+    healthcheck:
+      # The monitor is a worker (no bearer-gated network API), so liveness is a
+      # credential-free /health on its local port.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8016/health', timeout=6).close()"]
+      interval: 30s
+      timeout: 6s
+      retries: 5
+      start_period: 30s
+
 volumes:
   fskb-state:
+  fskb-monitor-state:

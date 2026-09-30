@@ -84,6 +84,17 @@ class Settings:
     drop_secret_only: bool = True
     min_symptom_chars: int = 15
 
+    # Correlated-ticket monitor (Phase 1)
+    monitor_db_path: str = "monitor.sqlite"
+    monitor_window_minutes: int = 60
+    monitor_min_count: int = 3
+    monitor_cooldown_minutes: int = 120
+    monitor_interval_seconds: int = 300
+    monitor_lookback_minutes: int = 180
+    monitor_health_port: int = 8016
+    monitor_dry_run: bool = False
+    monitor_max_per_poll: int = 500
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -109,6 +120,15 @@ class Settings:
             embed_batch_size=_env_int("EMBED_BATCH_SIZE", 16),
             drop_secret_only=_env_bool("DROP_SECRET_ONLY", True),
             min_symptom_chars=_env_int("MIN_SYMPTOM_CHARS", 15),
+            monitor_db_path=_env("MONITOR_DB_PATH", "monitor.sqlite") or "monitor.sqlite",
+            monitor_window_minutes=_env_int("MONITOR_WINDOW_MINUTES", 60),
+            monitor_min_count=_env_int("MONITOR_MIN_COUNT", 3),
+            monitor_cooldown_minutes=_env_int("MONITOR_COOLDOWN_MINUTES", 120),
+            monitor_interval_seconds=_env_int("MONITOR_INTERVAL_SECONDS", 300),
+            monitor_lookback_minutes=_env_int("MONITOR_LOOKBACK_MINUTES", 180),
+            monitor_health_port=_env_int("MONITOR_HEALTH_PORT", 8016),
+            monitor_dry_run=_env_bool("MONITOR_DRY_RUN", False),
+            monitor_max_per_poll=_env_int("MONITOR_MAX_PER_POLL", 500),
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------
