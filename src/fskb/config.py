@@ -46,6 +46,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = _env(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass
 class Settings:
     """Resolved runtime configuration."""
@@ -95,6 +105,13 @@ class Settings:
     monitor_dry_run: bool = False
     monitor_max_per_poll: int = 500
 
+    # Correlated-ticket monitor - Phase 2 baseline gate
+    monitor_baseline_enabled: bool = True
+    monitor_baseline_weeks: int = 8
+    monitor_baseline_tz: str = "America/Detroit"
+    monitor_baseline_interval_hours: int = 24
+    monitor_baseline_sigma: float = 3.0
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -129,6 +146,11 @@ class Settings:
             monitor_health_port=_env_int("MONITOR_HEALTH_PORT", 8016),
             monitor_dry_run=_env_bool("MONITOR_DRY_RUN", False),
             monitor_max_per_poll=_env_int("MONITOR_MAX_PER_POLL", 500),
+            monitor_baseline_enabled=_env_bool("MONITOR_BASELINE_ENABLED", True),
+            monitor_baseline_weeks=_env_int("MONITOR_BASELINE_WEEKS", 8),
+            monitor_baseline_tz=_env("MONITOR_BASELINE_TZ", "America/Detroit") or "America/Detroit",
+            monitor_baseline_interval_hours=_env_int("MONITOR_BASELINE_INTERVAL_HOURS", 24),
+            monitor_baseline_sigma=_env_float("MONITOR_BASELINE_SIGMA", 3.0),
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------

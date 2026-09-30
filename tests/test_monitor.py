@@ -258,3 +258,108 @@ def test_list_tickets_created_since_is_local_filter():
     assert captured.get("updated_since") == "2026-09-30T10:00:00Z"  # superset pull
     assert "created_since" not in captured                          # API would 400 on it
     assert [t["id"] for t in got] == [2]                           # local created_at filter
+
+
+# --- Phase 2: baseline aggregation + gate ----------------------------------
+from zoneinfo import ZoneInfo  # noqa: E402
+
+import statistics  # noqa: E402
+
+DETROIT = ZoneInfo("America/Detroit")
+
+
+def _ticket_at(tid, dt, cat="Engage", sub="Engage Desktop"):
+    return {"id": tid, "created_at": _iso(dt), "category": cat, "sub_category": sub}
+
+
+def test_compute_baseline_rows_median_mad_and_zero_fill():
+    now = datetime(2026, 10, 14, 15, 0, tzinfo=UTC)  # a Wednesday
+    weeks = 4
+    week_keys = M._weeks_in_window(now, weeks, DETROIT)
+    k = len(week_keys)
+    # Key A: j+1 tickets in each week's Monday 09:00 -> deterministic series.
+    now_local = now.astimezone(DETROIT)
+    monday_local = (now_local - timedelta(days=now_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    tickets = []
+    tid = 0
+    for j, _ in enumerate(week_keys):
+        for _n in range(j + 1):
+            d = monday_local - timedelta(weeks=j) + timedelta(hours=9, minutes=_n)
+            tickets.append(_ticket_at(tid := tid + 1, d.astimezone(UTC)))
+    # Key B: only 3 tickets, all in the most recent week -> other weeks zero-fill.
+    for _n in range(3):
+        d = monday_local + timedelta(hours=9, minutes=_n)
+        tickets.append(_ticket_at(tid := tid + 1, d.astimezone(UTC), cat="Software", sub="Microsoft"))
+
+    rows = {(r[0], r[1], r[2]): r for r in M.compute_baseline_rows(tickets, weeks, "America/Detroit", now)}
+    a = rows[("engage/engage desktop", 0, 9)]
+    assert a[3] == k  # n == number of weeks observed
+    assert a[4] == statistics.median(range(1, k + 1))
+    assert a[5] == statistics.median([abs(v - a[4]) for v in range(1, k + 1)])
+    b = rows[("software/microsoft", 0, 9)]
+    assert b[3] == k and b[4] == 0.0  # 3 real + zeros -> median 0
+
+
+def test_baseline_threshold_none_without_rows(tmp_path):
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"))
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    tickets = [parse_ticket(t) for t in _synthetic(3)]
+    assert mon.baseline_threshold(tickets, T0 + timedelta(minutes=5)) is None
+
+
+def _monitor_with_baseline(tmp_path, median, mad):
+    now = T0 + timedelta(minutes=5)
+    local = now.astimezone(DETROIT)
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), dry_run=True)
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    mon.store.replace_baseline(
+        [("engage/engage desktop", local.weekday(), local.hour, 8, median, mad)], M.iso(now)
+    )
+    return mon, now
+
+
+def test_low_baseline_still_fires(tmp_path):
+    mon, now = _monitor_with_baseline(tmp_path, median=0.0, mad=0.0)  # threshold max(3,0)=3
+    assert len(mon.replay(_synthetic(3), now=now)) == 1
+
+
+def test_high_baseline_suppresses_cluster(tmp_path):
+    # Normal volume at this (dow,hour) is ~10, so a 3-ticket cluster is not news.
+    mon, now = _monitor_with_baseline(tmp_path, median=10.0, mad=0.0)  # threshold 10
+    lines = []
+    mon.emit = lines.append
+    assert mon.replay(_synthetic(3), now=now) == []
+    assert any("[suppressed]" in ln for ln in lines)
+
+
+def test_no_baseline_falls_back_to_phase1_rule(tmp_path):
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), dry_run=True)
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    mon.store.replace_baseline([], M.iso(T0))  # empty baseline
+    assert len(mon.replay(_synthetic(3), now=T0 + timedelta(minutes=5))) == 1
+
+
+def test_run_baseline_writes_rows_and_stamp(tmp_path):
+    class _Client:
+        def list_tickets(self, **kw):
+            return [_ticket_at(i + 1, T0 - timedelta(weeks=i)) for i in range(3)]
+
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), baseline_weeks=8)
+    mon = M.CorrelatedMonitor(cfg, client=_Client(), emit=lambda *_: None)
+    rows, tickets = mon.run_baseline(now=T0)
+    assert rows >= 1 and tickets == 3
+    assert mon.store.get_meta("baseline_at") == _iso(T0)
+    assert len(mon.store.all_baseline()) >= 1
+
+
+def test_run_baseline_writes_even_in_dry_run(tmp_path):
+    class _Client:
+        def list_tickets(self, **kw):
+            return [_ticket_at(i + 1, T0 - timedelta(weeks=i)) for i in range(3)]
+
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), baseline_weeks=8, dry_run=True)
+    mon = M.CorrelatedMonitor(cfg, client=_Client(), emit=lambda *_: None)
+    mon.run_baseline(now=T0)
+    assert mon.store.get_meta("baseline_at") == _iso(T0)

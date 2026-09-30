@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import sqlite3
+import statistics
 import sys
 import threading
 from collections import defaultdict
@@ -36,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
@@ -240,6 +242,28 @@ class ClusterStore:
         except Exception:
             return default
 
+    # --- baseline (Phase 2) ---
+    def get_baseline(self, key: str, dow: int, hour: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM baseline WHERE key=? AND dow=? AND hour=?", (key, dow, hour)
+        ).fetchone()
+
+    def replace_baseline(self, rows: Sequence[tuple], updated_at: str) -> None:
+        """Atomically swap the whole baseline table and stamp the run time."""
+
+        with self.conn:
+            self.conn.execute("DELETE FROM baseline")
+            self.conn.executemany(
+                "INSERT INTO baseline(key, dow, hour, n, median, mad, updated_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                [(k, d, h, n, med, mad, updated_at) for (k, d, h, n, med, mad) in rows],
+            )
+
+    def all_baseline(self) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM baseline ORDER BY key, dow, hour"
+        ).fetchall()
+
     # --- alerts / cooldown ---
     def in_cooldown(self, key: str, now: datetime) -> Optional[sqlite3.Row]:
         row = self.conn.execute(
@@ -300,6 +324,12 @@ class MonitorConfig:
     health_port: int = 8016
     dry_run: bool = False
     max_per_poll: int = 500
+    # Phase 2 baseline gate
+    baseline_enabled: bool = True
+    baseline_weeks: int = 8
+    baseline_tz: str = "America/Detroit"
+    baseline_interval_hours: int = 24
+    baseline_sigma: float = 3.0
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MonitorConfig":
@@ -313,6 +343,11 @@ class MonitorConfig:
             health_port=settings.monitor_health_port,
             dry_run=settings.monitor_dry_run,
             max_per_poll=settings.monitor_max_per_poll,
+            baseline_enabled=settings.monitor_baseline_enabled,
+            baseline_weeks=settings.monitor_baseline_weeks,
+            baseline_tz=settings.monitor_baseline_tz,
+            baseline_interval_hours=settings.monitor_baseline_interval_hours,
+            baseline_sigma=settings.monitor_baseline_sigma,
         )
 
 
@@ -377,6 +412,14 @@ class CorrelatedMonitor:
         for key, tickets in self.window.clusters(now, self.cfg.min_count).items():
             if self.store.in_cooldown(key, now):
                 continue
+            if self.cfg.baseline_enabled:
+                threshold = self.baseline_threshold(tickets, now)
+                if threshold is not None and len(tickets) < threshold:
+                    self.emit(
+                        f"[suppressed] key={key} observed={len(tickets)} < baseline "
+                        f"threshold={threshold:.2f}"
+                    )
+                    continue
             alert_id = self.fire_alert(key, tickets, now)
             if alert_id is not None:
                 fired.append(alert_id)
@@ -406,6 +449,68 @@ class CorrelatedMonitor:
         except Exception as exc:  # a hook must not break the loop
             self.emit(f"[alert] #{alert_id} report hook error: {exc}")
         return alert_id
+
+    # --- baseline (Phase 2) ---
+    def baseline_threshold(self, tickets: Sequence[Ticket], now: datetime) -> Optional[float]:
+        """``max(3, median + K*sigma)`` for the cluster's system key(s).
+
+        ``sigma = 1.4826*MAD`` (robust to outliers). Uses the MOST CONSERVATIVE
+        (highest) threshold among the system keys the cluster touches, so a
+        category whose normal volume already explains the count does not become
+        news. Returns None when no baseline exists -> caller falls back to the
+        Phase 1 rule (``>= min_count``).
+        """
+
+        tz = ZoneInfo(self.cfg.baseline_tz)
+        local = now.astimezone(tz)
+        dow, hour = local.weekday(), local.hour
+        syskeys = [t.system_key for t in tickets]
+        if not syskeys:
+            return None
+        dominant = max(set(syskeys), key=syskeys.count)
+        best: Optional[float] = None
+        for sk in {dominant, *syskeys}:
+            row = self.store.get_baseline(sk, dow, hour)
+            if not row:
+                continue
+            sigma = 1.4826 * float(row["mad"] or 0.0)
+            thr = max(3.0, float(row["median"] or 0.0) + self.cfg.baseline_sigma * sigma)
+            best = thr if best is None else max(best, thr)
+        return best
+
+    def run_baseline(self, now: Optional[datetime] = None) -> tuple:
+        """Aggregate ~``baseline_weeks`` of created tickets into median+MAD rows."""
+
+        now = now or utcnow()
+        since = iso(now - timedelta(weeks=self.cfg.baseline_weeks))
+        raw: List[Dict[str, Any]] = []
+        if self.client is not None:
+            raw = list(
+                self.client.list_tickets(
+                    created_since=since, order_by="created_at", order_type="desc"
+                )
+            )
+        rows = compute_baseline_rows(raw, self.cfg.baseline_weeks, self.cfg.baseline_tz, now)
+        # The baseline is derived INTERNAL state (never an outward action), so it
+        # is written even in dry-run mode; dry-run only suppresses ticket notes.
+        self.store.replace_baseline(rows, iso(now))
+        self.store.set_meta("baseline_at", iso(now))
+        self.emit(f"[baseline] {len(rows)} row(s) from {len(raw)} ticket(s) written")
+        return len(rows), len(raw)
+
+    def maybe_run_baseline(self, now: Optional[datetime] = None) -> None:
+        """Run the baseline when it is missing or older than the interval."""
+
+        now = now or utcnow()
+        if not self.cfg.baseline_enabled:
+            return
+        last = parse_dt(self.store.get_meta("baseline_at"))
+        if last is not None and (now - last) < timedelta(hours=self.cfg.baseline_interval_hours):
+            return
+        try:
+            self.run_baseline(now)
+        except Exception as exc:  # never break the loop over a baseline failure
+            self.emit(f"[baseline] error: {exc}")
 
     # --- note text ---
     def compose_note(self, key: str, tickets: Sequence[Ticket], now: datetime) -> str:
@@ -452,6 +557,7 @@ class CorrelatedMonitor:
         )
         while True:
             try:
+                self.maybe_run_baseline()
                 self.poll_once()
             except Exception as exc:  # keep the daemon alive
                 self.emit(f"[monitor] poll error: {exc}")
@@ -460,6 +566,48 @@ class CorrelatedMonitor:
 
 def _indent(text: str, prefix: str = "    ") -> str:
     return "\n".join(prefix + ln for ln in text.splitlines())
+
+
+def _weeks_in_window(now: datetime, weeks: int, tzinfo) -> List[tuple]:
+    """The ISO (year, week) keys covering the trailing ``weeks`` weeks."""
+
+    local = now.astimezone(tzinfo)
+    out = set()
+    for i in range(weeks * 7 + 1):
+        iso = (local - timedelta(days=i)).isocalendar()
+        out.add((iso[0], iso[1]))
+    return sorted(out)
+
+
+def compute_baseline_rows(
+    tickets: Iterable[Dict[str, Any]], weeks: int, tz_name: str, now: datetime
+) -> List[tuple]:
+    """Aggregate tickets into (key, dow, hour, n, median, mad) rows.
+
+    For each system key and each (day-of-week, hour) slot in LOCAL time, the
+    series is the per-week CREATE count; median and MAD are taken over that
+    series (0-filled for weeks with no ticket in the slot, so the typical rate
+    is not inflated).
+    """
+
+    tzinfo = ZoneInfo(tz_name)
+    per_slot: Dict[tuple, Dict[tuple, int]] = defaultdict(lambda: defaultdict(int))
+    for raw in tickets:
+        created = parse_dt(raw.get("created_at"))
+        if created is None:
+            continue
+        local = created.astimezone(tzinfo)
+        key = system_key(raw.get("category"), raw.get("sub_category"))
+        iso = local.isocalendar()
+        per_slot[(key, local.weekday(), local.hour)][(iso[0], iso[1])] += 1
+    weekset = _weeks_in_window(now, weeks, tzinfo)
+    rows: List[tuple] = []
+    for (key, dow, hour), counts in per_slot.items():
+        values = [counts.get(w, 0) for w in weekset]
+        med = float(statistics.median(values)) if values else 0.0
+        mad = float(statistics.median([abs(v - med) for v in values])) if values else 0.0
+        rows.append((key, dow, hour, len(values), med, mad))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -553,6 +701,15 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
     start_health_server(monitor, port=monitor.cfg.health_port)
     monitor.run_forever()
+    return 0
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:
+    """Compute (and store) the open-rate baseline once, then exit."""
+
+    monitor = _build_monitor(args)
+    rows, tickets = monitor.run_baseline()
+    print(f"baseline: {rows} row(s) from {tickets} ticket(s)")
     return 0
 
 

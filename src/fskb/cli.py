@@ -258,6 +258,12 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     return cmd_monitor(args)
 
 
+def _cmd_baseline(args: argparse.Namespace) -> int:
+    from .monitor import cmd_baseline
+
+    return cmd_baseline(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fskb", description="FreshService -> Azure AI Search KB")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -344,6 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--health-port", dest="health_port", type=int, default=None,
                    help="HTTP /health port (0 disables)")
     p.set_defaults(func=_cmd_monitor)
+
+    p = sub.add_parser("baseline", help="compute the open-rate baseline (system key x dow x hour)")
+    p.add_argument("--dry-run", action="store_true", help="compute but do not write")
+    p.add_argument("--db", default=None, help="SQLite path (default MONITOR_DB_PATH)")
+    p.set_defaults(func=_cmd_baseline)
 
     p = sub.add_parser("status", help="redacted config + index count")
     p.set_defaults(func=cmd_status)
