@@ -883,7 +883,12 @@ def record_verdict(
         con.commit()
     finally:
         con.close()
-    log_cluster_verdict(Path(feedback_log), alert_id, verdict, agent, note, cluster_key)
+    # The DB is the source of truth; the shared JSONL is best-effort mirroring and
+    # must never fail the (already-committed) record or drop the HTTP response.
+    try:
+        log_cluster_verdict(Path(feedback_log), alert_id, verdict, agent, note, cluster_key)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[feedback] jsonl append failed (non-fatal): {exc}", file=sys.stderr)
 
 
 def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port: int = 8016):
@@ -913,25 +918,24 @@ def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port:
                 self.send_response(404)
                 self.end_headers()
                 return
-            token = monitor.cfg.api_token or ""
-            auth = self.headers.get("Authorization", "")
-            if not token or not hmac.compare_digest(auth, "Bearer " + token):
-                self._json(401, {"error": "unauthorized"})
-                return
-            length = int(self.headers.get("Content-Length") or 0)
             try:
+                token = monitor.cfg.api_token or ""
+                auth = self.headers.get("Authorization", "")
+                if not token or not hmac.compare_digest(auth, "Bearer " + token):
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                length = int(self.headers.get("Content-Length") or 0)
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 alert_id = int(payload["alert_id"])
                 verdict = str(payload["verdict"])
-            except Exception as exc:
-                self._json(400, {"error": f"bad request: {exc}"})
-                return
-            record_verdict(
-                monitor.store.path, monitor.cfg.feedback_log, alert_id, verdict,
-                payload.get("agent"), payload.get("note"), payload.get("cluster_key"),
-                bool(payload.get("close")),
-            )
-            self._json(200, {"ok": True, "alert_id": alert_id, "verdict": verdict})
+                record_verdict(
+                    monitor.store.path, monitor.cfg.feedback_log, alert_id, verdict,
+                    payload.get("agent"), payload.get("note"), payload.get("cluster_key"),
+                    bool(payload.get("close")),
+                )
+                self._json(200, {"ok": True, "alert_id": alert_id, "verdict": verdict})
+            except Exception as exc:  # always answer, never drop the connection
+                self._json(500, {"error": str(exc)[:200]})
 
         def _json(self, code, obj):  # noqa: ANN001
             body = json.dumps(obj).encode()
