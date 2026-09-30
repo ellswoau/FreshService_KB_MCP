@@ -240,6 +240,24 @@ def test_parse_status_text_up_and_issues():
     assert C.parse_status_text(html)["status"] == "up"
 
 
+def test_parse_status_anchors_to_banner_not_faq_or_history():
+    html = (
+        "<h2>Microsoft 365 status is up</h2>"
+        "<details><summary>How can I check if Microsoft 365 is experiencing an outage?</summary>"
+        "<p>Microsoft 365 reported 2 outages in the last 30 days.</p></details>"
+    )
+    assert C.parse_status_text(html)["status"] == "up"
+
+
+def test_parse_status_banner_experiencing_issues():
+    html = "<h2>Cloudflare is experiencing issues</h2><p>Recent Cloudflare outages</p>"
+    assert C.parse_status_text(html)["status"] == "issues"
+
+
+def test_parse_status_unknown_without_a_phrase():
+    assert C.parse_status_text("<h2>Some Vendor</h2><p>welcome</p>")["status"] == "unknown"
+
+
 def test_saas_status_counts_non_up_vendors(monkeypatch):
     cat = {"saas_status": [
         {"vendor": "Microsoft 365", "url": "http://x/m365"},

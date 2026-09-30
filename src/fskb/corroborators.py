@@ -369,28 +369,55 @@ def corroborate_changes(
 
 
 # --- SaaS vendor status (incidenthub.cloud status pages) -------------------
-_STATUS_RE = re.compile(r"status is (up|down|degraded|experiencing issues)", re.IGNORECASE)
-_CHECKED_RE = re.compile(r"Last checked ([0-9T:Z.\-]+)")
-_BAD_RE = re.compile(r"\b(outage|degraded|is down|experiencing issues|major outage)\b", re.IGNORECASE)
+# The status banner is an <h1>/<h2>: "<Vendor> status is up" / "<Vendor> is
+# experiencing issues". Match the BANNER, never the FAQ/history prose (which
+# contains phrases like "is experiencing an outage?" and "reported N outages").
+_BANNER_RE = re.compile(
+    r"<h[12][^>]*>[^<]*?"
+    r"(?:status is (up|down|degraded)|is experiencing "
+    r"(issues|an outage|degraded|service degradation)(?!\?))"
+    r"[^<]*?</h[12]>",
+    re.IGNORECASE,
+)
+_STATUS_LINE_RE = re.compile(r"status is (up|down|degraded)", re.IGNORECASE)
+_EXP_RE = re.compile(
+    r"is experiencing (issues|an outage|degraded|service degradation)(?!\?)", re.IGNORECASE
+)
+_CHECKED_RE = re.compile(r"Last checked[:\s]*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)")
+
+
+def _status_from_segment(segment: str) -> str:
+    m = _STATUS_LINE_RE.search(segment)
+    if m:
+        return "up" if m.group(1).lower() == "up" else "issues"
+    if _EXP_RE.search(segment):
+        return "issues"
+    return "unknown"
+
+
+def parse_status_text(text: str, vendor: Optional[str] = None) -> Dict[str, Any]:
+    """Extract {status, checked} from an incidenthub status page.
+
+    Anchored to the status banner: prefers the ``<h1>/<h2>`` status element, and
+    only falls back to the first ~400 chars (the banner region) of the page.
+    Returns ``unknown`` rather than guessing when no status phrase is present.
+    """
+
+    status = "unknown"
+    banner = _BANNER_RE.search(text)
+    if banner:
+        status = _status_from_segment(strip_html(banner.group(0)))
+    if status == "unknown":
+        head = strip_html(text)[:400]
+        status = _status_from_segment(head)
+    c = _CHECKED_RE.search(text)
+    return {"status": status, "checked": c.group(1) if c else None}
 
 
 def _http_get_text(url: str, timeout: int = 20) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "fskb-monitor/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "replace")
-
-
-def parse_status_text(text: str) -> Dict[str, Any]:
-    """Extract {status, checked} from an incidenthub status page's visible text."""
-
-    plain = strip_html(text)
-    m = _STATUS_RE.search(plain)
-    if m:
-        status = "up" if m.group(1).lower() == "up" else "issues"
-    else:
-        status = "issues" if _BAD_RE.search(plain) else "up"
-    c = _CHECKED_RE.search(plain)
-    return {"status": status, "checked": c.group(1) if c else None}
 
 
 def corroborate_saas_status(catalog: Dict[str, Any], timeout: int = 20) -> SignalResult:
