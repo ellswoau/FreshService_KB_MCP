@@ -363,3 +363,43 @@ def test_run_baseline_writes_even_in_dry_run(tmp_path):
     mon = M.CorrelatedMonitor(cfg, client=_Client(), emit=lambda *_: None)
     mon.run_baseline(now=T0)
     assert mon.store.get_meta("baseline_at") == _iso(T0)
+
+
+# --- Phase 3: corroborators wired into the alert ---------------------------
+class _FakeGraylog:
+    def search(self, stream_id, query, from_, to, limit=10):
+        if "VLSI_DESKTOP_PUSH_IMAGE_SCHEDULED" in query:
+            n = 2
+        elif "BROKER_" in query:
+            n = 3 if limit == 1 else 10
+        else:
+            n = 0
+        msg = {"message": {"timestamp": _iso(T0), "source": "Gambit.weller.corp",
+                           "View@6876_EventType": "VLSI_DESKTOP_PUSH_IMAGE_SCHEDULED",
+                           "View@6876_DesktopDisplayName": "GR Manufacturing Pool"}}
+        return {"total_results": n, "messages": [msg] if n else []}
+
+
+def test_alert_note_and_row_carry_corroborator_evidence(tmp_path):
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), dry_run=True)
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    mon.graylog = _FakeGraylog()  # inject: cause 2 + elevated effect -> likely
+    fired = mon.replay(_synthetic(3), now=T0 + timedelta(minutes=5))
+    assert len(fired) == 1
+    row = mon.store.conn.execute(
+        "SELECT evidence FROM alert WHERE id=?", (fired[0],)
+    ).fetchone()
+    import json as _json
+
+    ev = _json.loads(row["evidence"])
+    assert ev["confidence"] == "likely"
+    assert ev["pools"] == ["GR Manufacturing Pool"]
+
+
+def test_note_without_corroborators_still_composes(tmp_path):
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), dry_run=True)
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)  # graylog None
+    tickets = [parse_ticket(t) for t in _synthetic(3)]
+    note = mon.compose_note("app:engage", tickets, T0)
+    assert "Corroborators" not in note  # no evidence -> no section
+    assert "#1000" in note

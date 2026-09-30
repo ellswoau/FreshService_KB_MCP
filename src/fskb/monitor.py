@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
+from .corroborators import CorroborationResult, GraylogClient, corroborate, load_catalog
 
 # A report hook receives (alert_id, cluster_key, tickets, note_text) and returns
 # nothing. Default is a no-op: Phase 1 leaves the report channel pluggable and
@@ -206,7 +207,15 @@ class ClusterStore:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA busy_timeout=10000")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive migrations for pre-existing DB files (evidence column)."""
+
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(alert)")}
+        if "evidence" not in cols:
+            self.conn.execute("ALTER TABLE alert ADD COLUMN evidence TEXT")
 
     # --- meta ---
     def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
@@ -279,12 +288,13 @@ class ClusterStore:
         ).fetchone()
 
     def record_alert(
-        self, key: str, first_ticket_id: int, opened_at: datetime, count: int, cooldown_until: datetime
+        self, key: str, first_ticket_id: int, opened_at: datetime, count: int,
+        cooldown_until: datetime, evidence: Optional[str] = None,
     ) -> int:
         cur = self.conn.execute(
-            "INSERT INTO alert(key, first_ticket_id, opened_at, count, status, cooldown_until)"
-            " VALUES(?,?,?,?, 'open', ?)",
-            (key, first_ticket_id, iso(opened_at), count, iso(cooldown_until)),
+            "INSERT INTO alert(key, first_ticket_id, opened_at, count, status, cooldown_until, evidence)"
+            " VALUES(?,?,?,?, 'open', ?, ?)",
+            (key, first_ticket_id, iso(opened_at), count, iso(cooldown_until), evidence),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -330,6 +340,14 @@ class MonitorConfig:
     baseline_tz: str = "America/Detroit"
     baseline_interval_hours: int = 24
     baseline_sigma: float = 3.0
+    # Phase 3 corroborators
+    corroborate_enabled: bool = True
+    corroborate_cause_lookback_hours: int = 24
+    corroborate_effect_lookback_hours: int = 1
+    corroborate_limit: int = 8
+    graylog_url: Optional[str] = None
+    graylog_api_token: Optional[str] = None
+    graylog_verify_ssl: bool = True
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MonitorConfig":
@@ -348,6 +366,13 @@ class MonitorConfig:
             baseline_tz=settings.monitor_baseline_tz,
             baseline_interval_hours=settings.monitor_baseline_interval_hours,
             baseline_sigma=settings.monitor_baseline_sigma,
+            corroborate_enabled=settings.monitor_corroborate_enabled,
+            corroborate_cause_lookback_hours=settings.monitor_corroborate_cause_lookback_hours,
+            corroborate_effect_lookback_hours=settings.monitor_corroborate_effect_lookback_hours,
+            corroborate_limit=settings.monitor_corroborate_limit,
+            graylog_url=settings.graylog_url,
+            graylog_api_token=settings.graylog_api_token,
+            graylog_verify_ssl=settings.graylog_verify_ssl,
         )
 
 
@@ -366,6 +391,12 @@ class CorrelatedMonitor:
         self.window = LiveWindow(config.window_minutes)
         self.report_hook = report_hook or (lambda *a, **k: None)
         self.emit = emit
+        self.catalog = load_catalog()
+        self.graylog: Optional[GraylogClient] = None
+        if config.corroborate_enabled and config.graylog_url and config.graylog_api_token:
+            self.graylog = GraylogClient(
+                config.graylog_url, config.graylog_api_token, config.graylog_verify_ssl
+            )
 
     # --- ingestion ---
     def ingest(self, raw: Dict[str, Any]) -> Optional[Ticket]:
@@ -431,9 +462,11 @@ class CorrelatedMonitor:
             return None
         tickets = sorted(tickets, key=lambda t: (t.created_at, t.id))
         first = tickets[0]
-        note = self.compose_note(key, tickets, now)
+        evidence = self._corroborate(now)
+        note = self.compose_note(key, tickets, now, evidence=evidence)
         alert_id = self.store.record_alert(
-            key, first.id, now, len(tickets), now + timedelta(minutes=self.cfg.cooldown_minutes)
+            key, first.id, now, len(tickets), now + timedelta(minutes=self.cfg.cooldown_minutes),
+            evidence=_evidence_json(evidence),
         )
         if self.cfg.dry_run:
             self.emit(f"[dry-run] alert #{alert_id} key={key} first={first.id} count={len(tickets)}")
@@ -512,8 +545,29 @@ class CorrelatedMonitor:
         except Exception as exc:  # never break the loop over a baseline failure
             self.emit(f"[baseline] error: {exc}")
 
+    # --- corroborators (Phase 3) ---
+    def _corroborate(self, now: datetime) -> Optional[CorroborationResult]:
+        if self.graylog is None:
+            return None
+        try:
+            return corroborate(
+                self.graylog,
+                self.catalog,
+                now - timedelta(minutes=self.cfg.window_minutes),
+                now,
+                cause_lookback_hours=self.cfg.corroborate_cause_lookback_hours,
+                effect_lookback_hours=self.cfg.corroborate_effect_lookback_hours,
+                limit=self.cfg.corroborate_limit,
+            )
+        except Exception as exc:  # evidence is best-effort; never lose the alert
+            self.emit(f"[corroborate] error: {exc}")
+            return None
+
     # --- note text ---
-    def compose_note(self, key: str, tickets: Sequence[Ticket], now: datetime) -> str:
+    def compose_note(
+        self, key: str, tickets: Sequence[Ticket], now: datetime,
+        evidence: Optional[CorroborationResult] = None,
+    ) -> str:
         label = label_for(key)
         syskeys = sorted({t.system_key for t in tickets})
         lines = [
@@ -533,6 +587,9 @@ class CorrelatedMonitor:
             "This is a heuristic cluster, not a confirmed incident. No tickets were merged;",
             "verify against the live systems before acting.",
         ]
+        if evidence is not None:
+            lines.append("")
+            lines.extend(evidence.summary_lines())
         return "\n".join(lines)
 
     # --- synthetic replay (verification / tests) ---
@@ -566,6 +623,22 @@ class CorrelatedMonitor:
 
 def _indent(text: str, prefix: str = "    ") -> str:
     return "\n".join(prefix + ln for ln in text.splitlines())
+
+
+def _evidence_json(evidence: Optional[CorroborationResult]) -> Optional[str]:
+    if evidence is None:
+        return None
+    return json.dumps(
+        {
+            "confidence": evidence.confidence,
+            "signals": [
+                {"key": r.key, "role": r.role, "count": r.count,
+                 "prior": r.prior_count, "elevated": r.elevated}
+                for r in evidence.results
+            ],
+            "pools": evidence.pools(),
+        }
+    )
 
 
 def _weeks_in_window(now: datetime, weeks: int, tzinfo) -> List[tuple]:
@@ -631,6 +704,7 @@ def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port:
                     "last_poll_at": monitor.store.read_meta_readonly("last_poll_at"),
                     "window_keys": monitor.window.keys(),
                     "dry_run": monitor.cfg.dry_run,
+                    "corroborate": monitor.graylog is not None,
                 }
             ).encode()
             self.send_response(200)

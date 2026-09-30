@@ -112,6 +112,15 @@ class Settings:
     monitor_baseline_interval_hours: int = 24
     monitor_baseline_sigma: float = 3.0
 
+    # Corroborators (Phase 3) - independent-system evidence via Graylog REST
+    graylog_url: Optional[str] = None
+    graylog_api_token: Optional[str] = None
+    graylog_verify_ssl: bool = True
+    monitor_corroborate_enabled: bool = True
+    monitor_corroborate_cause_lookback_hours: int = 24
+    monitor_corroborate_effect_lookback_hours: int = 1
+    monitor_corroborate_limit: int = 8
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv_once()
@@ -151,6 +160,13 @@ class Settings:
             monitor_baseline_tz=_env("MONITOR_BASELINE_TZ", "America/Detroit") or "America/Detroit",
             monitor_baseline_interval_hours=_env_int("MONITOR_BASELINE_INTERVAL_HOURS", 24),
             monitor_baseline_sigma=_env_float("MONITOR_BASELINE_SIGMA", 3.0),
+            graylog_url=(_env("GRAYLOG_URL") or "").rstrip("/") or None,
+            graylog_api_token=_env("GRAYLOG_API_TOKEN"),
+            graylog_verify_ssl=_env_bool("GRAYLOG_VERIFY_SSL", True),
+            monitor_corroborate_enabled=_env_bool("MONITOR_CORROBORATE_ENABLED", True),
+            monitor_corroborate_cause_lookback_hours=_env_int("MONITOR_CORROBORATE_CAUSE_LOOKBACK_HOURS", 24),
+            monitor_corroborate_effect_lookback_hours=_env_int("MONITOR_CORROBORATE_EFFECT_LOOKBACK_HOURS", 1),
+            monitor_corroborate_limit=_env_int("MONITOR_CORROBORATE_LIMIT", 8),
         )
 
     # --- capability checks used by the CLI to fail fast and clearly ---------

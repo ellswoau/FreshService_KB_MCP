@@ -18,6 +18,9 @@ dependencies = [
 dev = ["pytest>=8.0"]
 mcp = ["fastmcp>=4.0,<5"]
 
+[tool.setuptools.package-data]
+fskb = ["data/*.json"]
+
 [project.scripts]
 fskb = "fskb.cli:main"
 fskb-mcp = "fskb.mcp_server:main"

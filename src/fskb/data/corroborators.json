@@ -1,0 +1,83 @@
+{
+  "_source_of_truth": "workshop skill 'corroborators' -> references/corroborators.md (mirrored here as machine-readable data; the skill md is the human view). Update both together.",
+  "_updated": "2026-09-30",
+  "streams": {
+    "horizon": {
+      "id": "693064393dbd12f7069db218",
+      "name": "Horizon",
+      "plane": "vdi",
+      "note": "Horizon Server Logs (NOT vCenter)."
+    },
+    "vcenter": {
+      "id": "68371dd26b15d5b15d218d7a",
+      "name": "vCenter",
+      "plane": "vdi",
+      "note": "vCenter syslog; base-VM publish/clone. Queries TBD."
+    }
+  },
+  "fields": {
+    "horizon": {
+      "event": "View@6876_EventType",
+      "module": "View@6876_Module",
+      "desktop_id": "View@6876_DesktopId",
+      "desktop": "View@6876_DesktopDisplayName",
+      "severity": "View@6876_Severity",
+      "user": "View@6876_UserDisplayName",
+      "source": "source",
+      "timestamp": "timestamp"
+    }
+  },
+  "signals": [
+    {
+      "key": "vdi.image_push",
+      "role": "cause",
+      "stream": "horizon",
+      "any": ["View@6876_EventType:VLSI_DESKTOP_PUSH_IMAGE_SCHEDULED"],
+      "event_field": "View@6876_EventType",
+      "display_fields": ["View@6876_DesktopDisplayName", "View@6876_UserDisplayName"],
+      "base_rate": "~2/week",
+      "note": "Admin action SCHEDULED, not proof the push applied or was faulty."
+    },
+    {
+      "key": "vdi.image_package_registered",
+      "role": "cause",
+      "stream": "horizon",
+      "any": ["View@6876_EventType:VLSI_AGENT_INSTALLER_PACKAGE_REGISTERED"],
+      "event_field": "View@6876_EventType",
+      "display_fields": ["View@6876_DesktopDisplayName"],
+      "base_rate": "~10/week",
+      "note": "Image registered/deregistered."
+    },
+    {
+      "key": "vdi.provisioning_error",
+      "role": "effect",
+      "stream": "horizon",
+      "any": [
+        "View@6876_EventType:BROKER_PROVISIONING_ERROR_VM_CLONING",
+        "View@6876_EventType:BROKER_PROVISIONING_ERROR_VM_CUSTOMIZATION_TIMEOUT",
+        "View@6876_EventType:BROKER_MACHINE_NOT_READY",
+        "View@6876_EventType:BROKER_MACHINE_OPERATION_DELETED"
+      ],
+      "event_field": "View@6876_EventType",
+      "display_fields": ["View@6876_DesktopDisplayName"],
+      "base_rate": "high (~2,300/8wk) -> elevation only, never presence",
+      "note": "Confirm the change landed on the same pool; judge by elevation vs the prior window."
+    },
+    {
+      "key": "vdi.broker_vc_link",
+      "role": "effect",
+      "stream": "horizon",
+      "any": ["View@6876_EventType:BROKER_VC_DISABLED"],
+      "event_field": "View@6876_EventType",
+      "display_fields": ["source"],
+      "base_rate": "low",
+      "note": "Connection-server <-> vCenter link down."
+    }
+  ],
+  "excluded_high_volume": [
+    {
+      "event": "AGENT_RECONFIGURED",
+      "why": "~3,300/day; never a trigger or corroborator"
+    }
+  ]
+}

@@ -104,7 +104,7 @@ def test_auth_middleware_allows_public_path(monkeypatch):
     async def send(msg):
         sent.append(msg)
 
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         mw({"type": "http", "path": "/health", "headers": []}, None, send)
     )
     assert sent[0]["status"] == 200
@@ -122,7 +122,7 @@ def test_auth_middleware_rejects_missing_token():
     async def send(msg):
         sent.append(msg)
 
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         mw({"type": "http", "path": "/mcp", "headers": []}, None, send)
     )
     assert sent[0]["status"] == 401
@@ -141,5 +141,5 @@ def test_auth_middleware_accepts_valid_token():
         sent.append(msg)
 
     scope = {"type": "http", "path": "/mcp", "headers": [(b"authorization", b"Bearer secret")]}
-    asyncio.get_event_loop().run_until_complete(mw(scope, None, send))
+    asyncio.run(mw(scope, None, send))
     assert sent[0]["status"] == 200
