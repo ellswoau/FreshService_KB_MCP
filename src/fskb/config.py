@@ -139,6 +139,9 @@ class Settings:
     # SaaS vendor status (incidenthub.cloud status pages, scraped)
     monitor_saas_enabled: bool = True
 
+    # Engage ClickOnce version/change cause signal
+    monitor_engage_version_enabled: bool = True
+
     # Phase 4 feedback loop
     monitor_report_webhook: Optional[str] = None   # Teams/other incoming webhook
     monitor_report_hook_url: Optional[str] = None  # OpenClaw agent hook (via Axle)
@@ -202,6 +205,7 @@ class Settings:
             freshservice_mcp_auth_token=_env("FRESHSERVICE_MCP_AUTH_TOKEN"),
             monitor_use_fs_mcp_changes=_env_bool("MONITOR_USE_FS_MCP_CHANGES", True),
             monitor_saas_enabled=_env_bool("MONITOR_SAAS_ENABLED", True),
+            monitor_engage_version_enabled=_env_bool("MONITOR_ENGAGE_VERSION_ENABLED", True),
             monitor_report_webhook=_env("MONITOR_REPORT_WEBHOOK"),
             monitor_report_hook_url=(_env("MONITOR_REPORT_HOOK_URL") or "").rstrip("/") or None,
             monitor_report_hook_token=_env("MONITOR_REPORT_HOOK_TOKEN"),

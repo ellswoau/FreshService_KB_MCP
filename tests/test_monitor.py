@@ -423,6 +423,20 @@ def test_cluster_keywords_drop_generic_words():
     assert all(len(w) >= 4 for w in kw)
 
 
+# --- Engage ClickOnce version/change cause signal ---------------------------
+def test_engage_version_signal_only_fires_on_change(tmp_path, monkeypatch):
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"))
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    monkeypatch.setattr(M, "_head_last_modified_and_version",
+                        lambda url, timeout=20: ("Fri, 25 Sep 2026 14:52:54 GMT", "6.1.9.9"))
+    assert mon._engage_version_signal(T0) is None            # first run -> baseline only
+    monkeypatch.setattr(M, "_head_last_modified_and_version",
+                        lambda url, timeout=20: ("Mon, 29 Sep 2026 16:00:00 GMT", "6.1.9.10"))
+    sig = mon._engage_version_signal(T0 + timedelta(hours=1))
+    assert sig is not None and sig.role == "cause" and sig.mode == "presence"
+    assert sig.count == 2                                    # prod + test-flight both moved
+
+
 class _FakeMCP:
     def call_tool(self, name, arguments=None):
         assert name == "desktop_pool_status"

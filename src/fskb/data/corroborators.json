@@ -86,5 +86,19 @@
     {"vendor": "Microsoft Azure", "url": "https://incidenthub.cloud/status/microsoft-azure"},
     {"vendor": "Cloudflare", "url": "https://incidenthub.cloud/status/cloudflare"},
     {"vendor": "Google Cloud Platform", "url": "https://incidenthub.cloud/status/google-cloud-platform"}
-  ]
+  ],
+  "engage_versions": [
+    {"name": "Engage (Prod)", "url": "https://clickonce.weller.corp/Engage/Engage.application"},
+    {"name": "Engage Test-Flight", "url": "https://clickonce.weller.corp/EngageBeta/Engage%20Test-Flight.application"}
+  ],
+  "seq": {
+    "note": "Engage application logs (Seq). PENDING: correct host/IP + read-only API key; seq.weller.corp did not resolve from gr-docker1.",
+    "level_field": "@l",
+    "time_field": "@t",
+    "app_field": "App",
+    "session_field": "SessionId",
+    "correlation_field": "CorrelationId",
+    "user_field": "UserId",
+    "machine_field": "MachineName"
+  }
 }

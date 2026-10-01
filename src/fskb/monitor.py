@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sqlite3
+import ssl
 import statistics
 import sys
 import threading
@@ -45,7 +46,10 @@ from zoneinfo import ZoneInfo
 
 from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
-from .corroborators import CorroborationResult, GraylogClient, MCPChangesClient, corroborate, load_catalog
+from .corroborators import (
+    CONF_CONSISTENT, CONF_LIKELY, CONF_NONE, CorroborationResult, GraylogClient,
+    MCPChangesClient, SignalResult, corroborate, load_catalog,
+)
 from .feedback import log_cluster_verdict
 from .mcp_client import MCPClient
 
@@ -384,6 +388,7 @@ class MonitorConfig:
     report_hook_token: Optional[str] = None
     api_token: Optional[str] = None
     note_via_agent: bool = False
+    engage_version_enabled: bool = True
     feedback_log: str = "feedback/events.jsonl"
 
     @classmethod
@@ -425,6 +430,7 @@ class MonitorConfig:
             report_hook_token=settings.monitor_report_hook_token,
             api_token=settings.monitor_api_token,
             note_via_agent=bool(settings.monitor_report_hook_url),
+            engage_version_enabled=settings.monitor_engage_version_enabled,
             feedback_log=settings.monitor_feedback_log,
         )
 
@@ -621,7 +627,7 @@ class CorrelatedMonitor:
         if self.graylog is None and self.horizon_mcp is None and self.client is None:
             return None
         try:
-            return corroborate(
+            result = corroborate(
                 self.graylog,
                 self.catalog,
                 now - timedelta(minutes=self.cfg.window_minutes),
@@ -636,9 +642,51 @@ class CorrelatedMonitor:
                 keywords=_cluster_keywords(key, tickets),
                 check_saas=self.cfg.saas_enabled,
             )
+            if self.cfg.engage_version_enabled:
+                vs = self._engage_version_signal(now)
+                if vs is not None:
+                    result.results.append(vs)
+                    cause = any(r.role == "cause" and r.elevated for r in result.results)
+                    effect = any(r.role == "effect" and r.elevated for r in result.results)
+                    result.confidence = (
+                        CONF_LIKELY if (cause and effect)
+                        else CONF_CONSISTENT if (cause or effect) else CONF_NONE
+                    )
+            return result
         except Exception as exc:  # evidence is best-effort; never lose the alert
             self.emit(f"[corroborate] error: {exc}")
             return None
+
+    def _engage_version_signal(self, now: datetime) -> Optional[SignalResult]:
+        """CAUSE signal: an Engage ClickOnce build was pushed (version/Last-Modified changed).
+
+        Prod + Test-Flight. Last-seen value is kept in the monitor's meta table, so the
+        first run only records a baseline.
+        """
+
+        targets = self.catalog.get("engage_versions", []) or []
+        changed: List[Dict[str, Any]] = []
+        for t in targets:
+            try:
+                lm, ver = _head_last_modified_and_version(t["url"])
+            except Exception as exc:
+                self.emit(f"[engage-version] {t.get('name')} check failed: {exc}")
+                continue
+            cur = f"{ver}|{lm}"
+            meta_key = f"engage_version:{t['name']}"
+            prev = self.store.get_meta(meta_key)
+            if prev and prev != cur:
+                changed.append({"app": t["name"], "version": ver,
+                                "last_modified": lm, "previous": prev})
+            self.store.set_meta(meta_key, cur)
+        if not changed:
+            return None
+        return SignalResult(
+            key="engage.version_change", role="cause", stream="clickonce",
+            query=",".join(t.get("name", "?") for t in targets),
+            count=len(changed), samples=changed, mode="presence",
+            note="Engage ClickOnce version/Last-Modified changed (an update was pushed).",
+        )
 
     # --- note text ---
     def compose_note(
@@ -778,6 +826,23 @@ def hook_reporter(url: str, token: str, timeout: int = 30):
 
 
 _POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
+
+
+def _head_last_modified_and_version(url: str, timeout: int = 20):
+    """HEAD the ClickOnce manifest for Last-Modified, GET it for the build version."""
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    head = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "fskb-monitor/1.0"})
+    with urllib.request.urlopen(head, timeout=timeout, context=ctx) as r:
+        last_modified = r.headers.get("Last-Modified")
+    get = urllib.request.Request(url, headers={"User-Agent": "fskb-monitor/1.0"})
+    with urllib.request.urlopen(get, timeout=timeout, context=ctx) as r:
+        body = r.read(20000).decode("utf-8", "replace")
+    m = re.search(r'assemblyIdentity[^>]*version="([0-9][0-9.]*)"', body) or \
+        re.search(r'version="([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"', body)
+    return last_modified, (m.group(1) if m else None)
 _STOPWORDS = {
     "with", "from", "that", "this", "cannot", "issue", "issues", "other", "desktop",
     "account", "error", "errors", "change", "changes", "standard", "update", "updates",
