@@ -24,3 +24,4 @@ feedback/
 .vscode/
 .idea/
 .DS_Store
+*.bak*
