@@ -141,20 +141,14 @@ class Settings:
 
     # Engage ClickOnce version/change cause signal
     monitor_engage_version_enabled: bool = True
+    # A prod deploy within this many hours counts as a CAUSE (covers a Friday deploy).
+    monitor_version_recency_hours: int = 100
 
     # Seq (Engage application logs) corroborator - active only when SEQ_API_KEY set
     seq_url: Optional[str] = None
     seq_api_key: Optional[str] = None
     seq_verify_ssl: bool = True
     monitor_seq_enabled: bool = True
-    # Seq-native detection (Engage errors past baseline, independent of tickets)
-    monitor_seq_detect_enabled: bool = True
-    monitor_seq_baseline_days: int = 56
-    monitor_seq_min_count: int = 25
-    monitor_seq_sigma: float = 3.0
-    monitor_seq_window_minutes: int = 60
-    monitor_seq_cooldown_minutes: int = 120
-    monitor_version_recency_hours: int = 100
 
     # Phase 4 feedback loop
     monitor_report_webhook: Optional[str] = None   # Teams/other incoming webhook
@@ -220,17 +214,11 @@ class Settings:
             monitor_use_fs_mcp_changes=_env_bool("MONITOR_USE_FS_MCP_CHANGES", True),
             monitor_saas_enabled=_env_bool("MONITOR_SAAS_ENABLED", True),
             monitor_engage_version_enabled=_env_bool("MONITOR_ENGAGE_VERSION_ENABLED", True),
+            monitor_version_recency_hours=_env_int("MONITOR_VERSION_RECENCY_HOURS", 100),
             seq_url=(_env("SEQ_URL") or "").rstrip("/") or None,
             seq_api_key=_env("SEQ_API_KEY"),
             seq_verify_ssl=_env_bool("SEQ_VERIFY_SSL", True),
             monitor_seq_enabled=_env_bool("MONITOR_SEQ_ENABLED", True),
-            monitor_seq_detect_enabled=_env_bool("MONITOR_SEQ_DETECT_ENABLED", True),
-            monitor_seq_baseline_days=_env_int("MONITOR_SEQ_BASELINE_DAYS", 56),
-            monitor_seq_min_count=_env_int("MONITOR_SEQ_MIN_COUNT", 25),
-            monitor_seq_sigma=float(_env("MONITOR_SEQ_SIGMA") or 3.0),
-            monitor_seq_window_minutes=_env_int("MONITOR_SEQ_WINDOW_MINUTES", 60),
-            monitor_seq_cooldown_minutes=_env_int("MONITOR_SEQ_COOLDOWN_MINUTES", 120),
-            monitor_version_recency_hours=_env_int("MONITOR_VERSION_RECENCY_HOURS", 100),
             monitor_report_webhook=_env("MONITOR_REPORT_WEBHOOK"),
             monitor_report_hook_url=(_env("MONITOR_REPORT_HOOK_URL") or "").rstrip("/") or None,
             monitor_report_hook_token=_env("MONITOR_REPORT_HOOK_TOKEN"),

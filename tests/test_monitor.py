@@ -414,49 +414,6 @@ def test_pool_hint_from_machine_hostname():
     assert M._pool_hint([parse_ticket({"id": 2, "created_at": _iso(T0), "description_text": "vpn"})]) is None
 
 
-# --- Seq-native detection ---------------------------------------------------
-class _FakeSeqCounter:
-    def __init__(self, count):
-        self._c = count
-
-    def count(self, filt, frm, to):
-        return self._c
-
-    def events(self, filt, count=100, from_dt=None, to_dt=None, render=True):
-        return []
-
-
-def test_seq_detection_fires_over_threshold(tmp_path):
-    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), seq_detect_enabled=True,
-                        seq_min_count=10, dry_run=True)
-    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
-    mon.seq = _FakeSeqCounter(50)
-    fired = mon.evaluate_seq(now=T0)
-    assert fired and len(fired) == 1
-    row = mon.store.conn.execute(
-        "select key,count,first_ticket_id from alert where id=?", (fired[0],)).fetchone()
-    assert row["key"] == cfg.seq_alert_key and row["count"] == 50
-    assert row["first_ticket_id"] is None        # a Seq alert has no ticket
-
-
-def test_seq_detection_suppressed_under_threshold(tmp_path):
-    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), seq_detect_enabled=True, seq_min_count=10)
-    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
-    mon.seq = _FakeSeqCounter(5)
-    assert mon.evaluate_seq(now=T0) == []
-
-
-def test_seq_threshold_uses_baseline(tmp_path):
-    from zoneinfo import ZoneInfo
-
-    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), seq_min_count=25, seq_sigma=3.0)
-    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
-    assert mon.seq_threshold(T0) == 25.0                     # no baseline -> min_count
-    loc = T0.astimezone(ZoneInfo(cfg.baseline_tz))
-    mon.store.replace_seq_baseline([(loc.weekday(), loc.hour, 8, 100.0, 5.0)], "x")
-    assert abs(mon.seq_threshold(T0) - (100.0 + 3.0 * 1.4826 * 5.0)) < 0.1
-
-
 def test_version_recency_gate_allows_friday_deploy():
     from datetime import datetime, timezone
 

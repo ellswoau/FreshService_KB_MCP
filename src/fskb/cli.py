@@ -264,12 +264,6 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
     return cmd_baseline(args)
 
 
-def _cmd_seq_baseline(args: argparse.Namespace) -> int:
-    from .monitor import cmd_seq_baseline
-
-    return cmd_seq_baseline(args)
-
-
 def _cmd_monitor_feedback(args: argparse.Namespace) -> int:
     from .monitor import cmd_monitor_feedback
 
@@ -367,10 +361,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="compute but do not write")
     p.add_argument("--db", default=None, help="SQLite path (default MONITOR_DB_PATH)")
     p.set_defaults(func=_cmd_baseline)
-
-    p = sub.add_parser("seq-baseline", help="backfill the Engage error-rate (Seq) baseline")
-    p.add_argument("--db", default=None, help="SQLite path (default MONITOR_DB_PATH)")
-    p.set_defaults(func=_cmd_seq_baseline)
 
     p = sub.add_parser("monitor-feedback", help="record a verdict on a monitor alert")
     p.add_argument("--alert-id", dest="alert_id", type=int, required=True)
