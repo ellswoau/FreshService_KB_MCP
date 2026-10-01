@@ -414,6 +414,22 @@ def test_pool_hint_from_machine_hostname():
     assert M._pool_hint([parse_ticket({"id": 2, "created_at": _iso(T0), "description_text": "vpn"})]) is None
 
 
+def test_version_cause_recent_prod_without_observed_change(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"), version_recency_hours=100)
+    mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
+    monkeypatch.setattr(M, "_head_last_modified_and_version",
+                        lambda url, timeout=20: ("Fri, 25 Sep 2026 14:52:54 GMT", "6.1.9.9"))
+    # <100h after the publish and NO prior meta -> never observed a change, yet recent.
+    now = datetime(2026, 9, 26, 16, 0, tzinfo=timezone.utc)
+    sig = mon._engage_version_signal(now, "app:engage")
+    assert sig is not None and sig.role == "cause"
+    assert any(s.get("changed") is False for s in sig.samples)   # recency, not change
+    # Engage-scoped: a non-Engage cluster gets no version cause.
+    assert mon._engage_version_signal(now, "print:printer") is None
+
+
 def test_version_recency_gate_allows_friday_deploy():
     from datetime import datetime, timezone
 
@@ -434,15 +450,16 @@ def test_cluster_keywords_drop_generic_words():
 
 
 # --- Engage ClickOnce version/change cause signal ---------------------------
-def test_engage_version_signal_only_fires_on_change(tmp_path, monkeypatch):
+def test_engage_version_signal_fires_on_observed_change(tmp_path, monkeypatch):
     cfg = MonitorConfig(db_path=str(tmp_path / "m.sqlite"))
     mon = M.CorrelatedMonitor(cfg, client=None, emit=lambda *_: None)
     monkeypatch.setattr(M, "_head_last_modified_and_version",
                         lambda url, timeout=20: ("Fri, 25 Sep 2026 14:52:54 GMT", "6.1.9.9"))
-    assert mon._engage_version_signal(T0) is None            # first run -> baseline only
+    # Baseline at T0: LM is ~5d old (> recency) and nothing changed yet -> no cause.
+    assert mon._engage_version_signal(T0, "app:engage") is None
     monkeypatch.setattr(M, "_head_last_modified_and_version",
                         lambda url, timeout=20: ("Mon, 29 Sep 2026 16:00:00 GMT", "6.1.9.10"))
-    sig = mon._engage_version_signal(T0 + timedelta(hours=1))
+    sig = mon._engage_version_signal(T0 + timedelta(hours=1), "app:engage")
     assert sig is not None and sig.role == "cause" and sig.mode == "presence"
     assert sig.count == 2                                    # prod + test-flight both moved
 

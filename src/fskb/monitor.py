@@ -659,7 +659,7 @@ class CorrelatedMonitor:
                 seq_client=self.seq,
             )
             if self.cfg.engage_version_enabled:
-                vs = self._engage_version_signal(now)
+                vs = self._engage_version_signal(now, key)
                 if vs is not None:
                     result.results.append(vs)
                     cause = any(r.role == "cause" and r.elevated for r in result.results)
@@ -673,41 +673,53 @@ class CorrelatedMonitor:
             self.emit(f"[corroborate] error: {exc}")
             return None
 
-    def _engage_version_signal(self, now: datetime) -> Optional[SignalResult]:
-        """CAUSE signal: a RECENT Engage ClickOnce publish (version/Last-Modified changed).
+    def _engage_version_signal(self, now: datetime, key: Optional[str] = None) -> Optional[SignalResult]:
+        """CAUSE signal: a RECENT Engage ClickOnce publish.
 
-        Prod + Test-Flight. Only a publish within ``version_recency_hours`` counts
-        (a stale change is not a cause; default 100h covers a Friday deploy), and
-        Prod is weighted above Test-Flight (Test-Flight publishes far more often).
-        Last-seen kept in meta, so the first run only records a baseline.
+        ENGAGE-SCOPED: only evaluated for an Engage cluster (``key`` mentions engage),
+        so a VDI cluster never gets an Engage-publish cause.
+
+        Fix #1 - RECENCY, not just change-detection: a *Prod* publish within
+        ``version_recency_hours`` (default 100h) counts as a cause EVEN IF we never
+        observed the transition (metadata was already baselined), so a Friday deploy
+        can explain a Monday incident. Test-Flight still counts only when a change was
+        observed (it publishes far more often). Prod weighted 1.0 / Test-Flight 0.3;
+        a merely-recent (unobserved) publish is down-weighted 0.7x.
         """
 
+        if not key or "engage" not in key.lower():
+            return None
         targets = self.catalog.get("engage_versions", []) or []
-        changed: List[Dict[str, Any]] = []
+        found: List[Dict[str, Any]] = []
         for t in targets:
+            name = t.get("name") or "?"
             try:
                 lm, ver = _head_last_modified_and_version(t["url"])
             except Exception as exc:
-                self.emit(f"[engage-version] {t.get('name')} check failed: {exc}")
+                self.emit(f"[engage-version] {name} check failed: {exc}")
                 continue
             cur = f"{ver}|{lm}"
-            meta_key = f"engage_version:{t['name']}"
+            meta_key = f"engage_version:{name}"
             prev = self.store.get_meta(meta_key)
-            if prev and prev != cur:
-                age_h = _http_date_age_hours(lm, now)
-                if age_h is None or age_h <= self.cfg.version_recency_hours:
-                    weight = 1.0 if "prod" in (t.get("name") or "").lower() else 0.3
-                    changed.append({"app": t["name"], "version": ver, "last_modified": lm,
-                                    "previous": prev, "age_hours": age_h, "weight": weight})
+            changed = bool(prev and prev != cur)
+            age_h = _http_date_age_hours(lm, now)
+            recent = age_h is not None and age_h <= self.cfg.version_recency_hours
+            is_prod = "prod" in name.lower()
+            if changed or (is_prod and recent):
+                base = 1.0 if is_prod else 0.3
+                weight = base if changed else round(base * 0.7, 2)
+                found.append({"app": name, "version": ver, "last_modified": lm,
+                              "previous": prev, "age_hours": age_h,
+                              "changed": changed, "weight": weight})
             self.store.set_meta(meta_key, cur)
-        if not changed:
+        if not found:
             return None
         return SignalResult(
             key="engage.version_change", role="cause", stream="clickonce",
             query=",".join(t.get("name", "?") for t in targets),
-            count=len(changed), samples=changed, mode="presence",
-            note=f"Recent Engage publish (recency<={self.cfg.version_recency_hours}h; "
-                 f"Prod weighted 1.0 vs Test-Flight 0.3).",
+            count=len(found), samples=found, mode="presence",
+            note=(f"Engage publish as cause: recent Prod (<={self.cfg.version_recency_hours}h, "
+                  f"recency-based) or an observed change; Prod 1.0 vs Test-Flight 0.3."),
         )
 
     # --- note text ---
