@@ -48,7 +48,7 @@ from .clusters import label_for, match_keys, primary_cluster_key, system_key
 from .config import Settings
 from .corroborators import (
     CONF_CONSISTENT, CONF_LIKELY, CONF_NONE, CorroborationResult, GraylogClient,
-    MCPChangesClient, SignalResult, corroborate, load_catalog,
+    MCPChangesClient, SeqClient, SignalResult, corroborate, load_catalog,
 )
 from .feedback import log_cluster_verdict
 from .mcp_client import MCPClient
@@ -389,6 +389,10 @@ class MonitorConfig:
     api_token: Optional[str] = None
     note_via_agent: bool = False
     engage_version_enabled: bool = True
+    seq_enabled: bool = True
+    seq_url: Optional[str] = None
+    seq_api_key: Optional[str] = None
+    seq_verify_ssl: bool = True
     feedback_log: str = "feedback/events.jsonl"
 
     @classmethod
@@ -431,6 +435,10 @@ class MonitorConfig:
             api_token=settings.monitor_api_token,
             note_via_agent=bool(settings.monitor_report_hook_url),
             engage_version_enabled=settings.monitor_engage_version_enabled,
+            seq_enabled=settings.monitor_seq_enabled,
+            seq_url=settings.seq_url,
+            seq_api_key=settings.seq_api_key,
+            seq_verify_ssl=settings.seq_verify_ssl,
             feedback_log=settings.monitor_feedback_log,
         )
 
@@ -461,6 +469,10 @@ class CorrelatedMonitor:
             self.horizon_mcp = MCPClient(
                 config.horizon_mcp_url, config.horizon_mcp_auth_token, config.horizon_mcp_verify_ssl
             )
+        # Seq (Engage application logs) - only when URL + key are configured.
+        self.seq: Optional[SeqClient] = None
+        if config.seq_enabled and config.seq_url and config.seq_api_key:
+            self.seq = SeqClient(config.seq_url, config.seq_api_key, config.seq_verify_ssl)
         # Change feed: prefer the FreshService MCP (humanised labels); fall back
         # to the direct FreshService client (self.client) otherwise.
         self.changes_client: Any = None
@@ -641,6 +653,7 @@ class CorrelatedMonitor:
                 change_lookback_hours=self.cfg.change_lookback_hours,
                 keywords=_cluster_keywords(key, tickets),
                 check_saas=self.cfg.saas_enabled,
+                seq_client=self.seq,
             )
             if self.cfg.engage_version_enabled:
                 vs = self._engage_version_signal(now)
@@ -997,6 +1010,7 @@ def start_health_server(monitor: CorrelatedMonitor, host: str = "0.0.0.0", port:
                 "dry_run": monitor.cfg.dry_run,
                 "corroborate": monitor.graylog is not None,
                 "horizon_mcp": monitor.horizon_mcp is not None,
+                "seq": monitor.seq is not None,
                 "note_via_agent": monitor.cfg.note_via_agent,
             })
 

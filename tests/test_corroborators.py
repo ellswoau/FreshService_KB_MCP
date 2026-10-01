@@ -268,6 +268,26 @@ def test_parse_status_unknown_without_a_phrase():
     assert C.parse_status_text("<h2>Some Vendor</h2><p>welcome</p>")["status"] == "unknown"
 
 
+class _FakeSeq:
+    def __init__(self, cur, prior):
+        self.cur, self.prior = cur, prior
+
+    def count(self, filt, frm, to):
+        return self.cur if to >= NOW else self.prior
+
+    def search(self, filt, frm, to, count=50):
+        return [{"@t": "2026-09-30T11:59:00Z", "@l": "Error", "MachineName": "BOS1-VDI-157",
+                 "UserId": "kvang", "@m": "Workflow failed"}]
+
+
+def test_corroborate_seq_is_elevation_effect():
+    res = C.corroborate_seq(_FakeSeq(cur=40, prior=5), NOW - timedelta(minutes=60), NOW)
+    assert res.key == "engage.log_errors" and res.role == "effect" and res.mode == "elevation"
+    assert res.count == 40 and res.prior_count == 5 and res.elevated is True
+    assert res.samples and res.samples[0]["machine"] == "BOS1-VDI-157"
+    assert "App = 'Engage'" in res.query
+
+
 def test_saas_status_counts_non_up_vendors(monkeypatch):
     cat = {"saas_status": [
         {"vendor": "Microsoft 365", "url": "http://x/m365"},

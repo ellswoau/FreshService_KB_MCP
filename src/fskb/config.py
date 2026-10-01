@@ -142,6 +142,12 @@ class Settings:
     # Engage ClickOnce version/change cause signal
     monitor_engage_version_enabled: bool = True
 
+    # Seq (Engage application logs) corroborator - active only when SEQ_API_KEY set
+    seq_url: Optional[str] = None
+    seq_api_key: Optional[str] = None
+    seq_verify_ssl: bool = True
+    monitor_seq_enabled: bool = True
+
     # Phase 4 feedback loop
     monitor_report_webhook: Optional[str] = None   # Teams/other incoming webhook
     monitor_report_hook_url: Optional[str] = None  # OpenClaw agent hook (via Axle)
@@ -206,6 +212,10 @@ class Settings:
             monitor_use_fs_mcp_changes=_env_bool("MONITOR_USE_FS_MCP_CHANGES", True),
             monitor_saas_enabled=_env_bool("MONITOR_SAAS_ENABLED", True),
             monitor_engage_version_enabled=_env_bool("MONITOR_ENGAGE_VERSION_ENABLED", True),
+            seq_url=(_env("SEQ_URL") or "").rstrip("/") or None,
+            seq_api_key=_env("SEQ_API_KEY"),
+            seq_verify_ssl=_env_bool("SEQ_VERIFY_SSL", True),
+            monitor_seq_enabled=_env_bool("MONITOR_SEQ_ENABLED", True),
             monitor_report_webhook=_env("MONITOR_REPORT_WEBHOOK"),
             monitor_report_hook_url=(_env("MONITOR_REPORT_HOOK_URL") or "").rstrip("/") or None,
             monitor_report_hook_token=_env("MONITOR_REPORT_HOOK_TOKEN"),

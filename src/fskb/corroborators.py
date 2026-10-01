@@ -188,6 +188,108 @@ def _sample(entry: Dict[str, Any], signal: Dict[str, Any], catalog: Dict[str, An
     return out
 
 
+# --- Seq (Engage application logs) -----------------------------------------
+
+
+class SeqClient:
+    """Minimal Seq client (Seq 2025.x). Auth: ``X-Seq-ApiKey``.
+
+    ``search`` returns raw events; ``count`` tries the signal endpoint (total) and
+    falls back to a capped event fetch. UNVERIFIED against the live server until a
+    read-only API key is supplied.
+    """
+
+    def __init__(self, url: str, api_key: str, verify_ssl: bool = True, timeout: int = 30):
+        self.url = url.rstrip("/")
+        self.api_key = api_key
+        self.verify_ssl = verify_ssl
+        self.timeout = timeout
+
+    def _headers(self) -> Dict[str, str]:
+        return {"X-Seq-ApiKey": self.api_key, "Accept": "application/json"}
+
+    def _ctx(self):  # noqa: ANN202
+        if self.verify_ssl:
+            return None
+        c = ssl.create_default_context()
+        c.check_hostname = False
+        c.verify_mode = ssl.CERT_NONE
+        return c
+
+    def search(self, filter_expr: str, from_dt: datetime, to_dt: datetime, count: int = 50):
+        params = urllib.parse.urlencode({
+            "filter": filter_expr, "count": count,
+            "fromDateUtc": _gl_ts(from_dt), "toDateUtc": _gl_ts(to_dt),
+        })
+        req = urllib.request.Request(f"{self.url}/api/events?{params}", headers=self._headers())
+        with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx()) as r:
+            return json.load(r)
+
+    def count(self, filter_expr: str, from_dt: datetime, to_dt: datetime) -> int:
+        params = urllib.parse.urlencode({
+            "filter": filter_expr, "fromDateUtc": _gl_ts(from_dt), "toDateUtc": _gl_ts(to_dt),
+        })
+        try:
+            req = urllib.request.Request(
+                f"{self.url}/api/events/signal?{params}", headers=self._headers()
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx()) as r:
+                data = json.load(r)
+            if isinstance(data, dict):
+                if "Count" in data:
+                    return int(data["Count"])
+                if "Slices" in data:
+                    return sum(int(s.get("Count", 0)) for s in data["Slices"])
+        except Exception:
+            pass
+        try:
+            return len(self.search(filter_expr, from_dt, to_dt, count=1000) or [])
+        except Exception:
+            return 0
+
+
+def corroborate_seq(
+    seq_client: SeqClient,
+    window_start: datetime,
+    window_end: datetime,
+    app: str = "Engage",
+    machine: Optional[str] = None,
+    session: Optional[str] = None,
+    lookback_hours: int = 1,
+    limit: int = 5,
+) -> SignalResult:
+    """Engage application error/warning rate from Seq = an EFFECT source.
+
+    High-volume logs corroborate only by ELEVATION vs the prior equal window.
+    """
+
+    clauses = [f"App = '{app}'", "(@Level = 'Error' or @Level = 'Warning')"]
+    if machine:
+        clauses.append(f"MachineName = '{machine}'")
+    if session:
+        clauses.append(f"SessionId = '{session}'")
+    filt = " and ".join(clauses)
+    frm = window_start - timedelta(hours=lookback_hours)
+    cur = seq_client.count(filt, window_start, window_end)
+    prior = seq_client.count(filt, frm, window_start)
+    samples: List[Dict[str, Any]] = []
+    try:
+        for e in (seq_client.search(filt, window_start, window_end, count=limit) or [])[:limit]:
+            samples.append({
+                "at": e.get("@t") or e.get("Timestamp"),
+                "level": e.get("@l") or e.get("Level"),
+                "machine": e.get("MachineName"), "user": e.get("UserId"),
+                "text": (e.get("@m") or e.get("Message") or "")[:120],
+            })
+    except Exception:
+        pass
+    return SignalResult(
+        key="engage.log_errors", role="effect", stream="seq", query=filt,
+        count=int(cur), prior_count=int(prior), samples=samples, mode="elevation",
+        note="Engage error/warning rate from Seq (elevation vs the prior window).",
+    )
+
+
 def corroborate_horizon_pools(mcp_client: MCPClient, pool_hint: Optional[str] = None) -> SignalResult:
     """Pool cloning/ERROR counts from Horizon via ``horizon-mcp`` (effect).
 
@@ -474,6 +576,8 @@ def corroborate(
     keywords: Optional[List[str]] = None,
     check_saas: bool = False,
     saas_timeout: int = 20,
+    seq_client: Any = None,
+    seq_app: str = "Engage",
 ) -> CorroborationResult:
     """Run every catalog signal for a cluster window and score the evidence.
 
@@ -548,6 +652,15 @@ def corroborate(
             results.append(
                 SignalResult(key="saas_status", role="cause", stream="incidenthub",
                              query="status pages", count=0, mode="presence", note=f"unavailable: {exc}")
+            )
+
+    if seq_client is not None:
+        try:
+            results.append(corroborate_seq(seq_client, window_start, window_end, app=seq_app))
+        except Exception as exc:  # evidence is best-effort
+            results.append(
+                SignalResult(key="engage.log_errors", role="effect", stream="seq",
+                             query="seq", count=0, mode="elevation", note=f"unavailable: {exc}")
             )
 
     cause_hit = any(r.role == "cause" and r.elevated for r in results)
