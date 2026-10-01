@@ -30,6 +30,7 @@ import hmac
 import html
 import json
 import os
+from email.utils import parsedate_to_datetime
 import re
 import sqlite3
 import ssl
@@ -204,6 +205,11 @@ CREATE INDEX IF NOT EXISTS idx_alert_key_opened ON alert(key, opened_at);
 CREATE TABLE IF NOT EXISTS feedback (
     alert_id INTEGER, verdict TEXT, agent TEXT, note TEXT, at TEXT
 );
+CREATE TABLE IF NOT EXISTS seq_baseline (
+    dow INTEGER NOT NULL, hour INTEGER NOT NULL,
+    n INTEGER NOT NULL DEFAULT 0, median REAL, mad REAL, updated_at TEXT,
+    PRIMARY KEY (dow, hour)
+);
 """
 
 
@@ -282,6 +288,20 @@ class ClusterStore:
         return self.conn.execute(
             "SELECT * FROM baseline ORDER BY key, dow, hour"
         ).fetchall()
+
+    # --- seq baseline (Engage error-rate by day/hour) ---
+    def get_seq_baseline(self, dow: int, hour: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM seq_baseline WHERE dow=? AND hour=?", (dow, hour)
+        ).fetchone()
+
+    def replace_seq_baseline(self, rows: Sequence[tuple], updated_at: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM seq_baseline")
+            self.conn.executemany(
+                "INSERT INTO seq_baseline(dow, hour, n, median, mad, updated_at) VALUES(?,?,?,?,?,?)",
+                [(d, h, n, med, mad, updated_at) for (d, h, n, med, mad) in rows],
+            )
 
     # --- alerts / cooldown ---
     def in_cooldown(self, key: str, now: datetime) -> Optional[sqlite3.Row]:
@@ -393,6 +413,14 @@ class MonitorConfig:
     seq_url: Optional[str] = None
     seq_api_key: Optional[str] = None
     seq_verify_ssl: bool = True
+    seq_detect_enabled: bool = True
+    seq_baseline_days: int = 56
+    seq_min_count: int = 25
+    seq_sigma: float = 3.0
+    seq_window_minutes: int = 60
+    seq_cooldown_minutes: int = 120
+    seq_alert_key: str = "app:engage:seq"
+    version_recency_hours: int = 100
     feedback_log: str = "feedback/events.jsonl"
 
     @classmethod
@@ -439,6 +467,13 @@ class MonitorConfig:
             seq_url=settings.seq_url,
             seq_api_key=settings.seq_api_key,
             seq_verify_ssl=settings.seq_verify_ssl,
+            seq_detect_enabled=settings.monitor_seq_detect_enabled,
+            seq_baseline_days=settings.monitor_seq_baseline_days,
+            seq_min_count=settings.monitor_seq_min_count,
+            seq_sigma=settings.monitor_seq_sigma,
+            seq_window_minutes=settings.monitor_seq_window_minutes,
+            seq_cooldown_minutes=settings.monitor_seq_cooldown_minutes,
+            version_recency_hours=settings.monitor_version_recency_hours,
             feedback_log=settings.monitor_feedback_log,
         )
 
@@ -514,11 +549,13 @@ class CorrelatedMonitor:
         self.store.heartbeat(now)
         closed = self.store.close_expired_alerts(now)
         alert_ids = self.evaluate(now)
+        self.maybe_run_seq_baseline(now)
+        seq_ids = self.evaluate_seq(now)
         self.emit(
             f"[poll] now={iso(now)} fetched={len(raw_tickets)} "
-            f"keys={len(self.window.keys())} alerts={alert_ids} closed={closed}"
+            f"keys={len(self.window.keys())} alerts={alert_ids} seq_alerts={seq_ids} closed={closed}"
         )
-        return alert_ids
+        return alert_ids + seq_ids
 
     # --- evaluation ---
     def evaluate(self, now: Optional[datetime] = None) -> List[int]:
@@ -701,6 +738,169 @@ class CorrelatedMonitor:
             note="Engage ClickOnce version/Last-Modified changed (an update was pushed).",
         )
 
+    def _engage_version_signal(self, now: datetime) -> Optional[SignalResult]:
+        """CAUSE signal: a RECENT Engage ClickOnce publish (version/Last-Modified changed).
+
+        Prod + Test-Flight. Only a publish within ``version_recency_hours`` counts
+        (a stale change is not a cause), and Prod is weighted above Test-Flight
+        (Test-Flight publishes far more often). Last-seen kept in meta, so the first
+        run only records a baseline.
+        """
+
+        targets = self.catalog.get("engage_versions", []) or []
+        changed: List[Dict[str, Any]] = []
+        for t in targets:
+            try:
+                lm, ver = _head_last_modified_and_version(t["url"])
+            except Exception as exc:
+                self.emit(f"[engage-version] {t.get('name')} check failed: {exc}")
+                continue
+            cur = f"{ver}|{lm}"
+            meta_key = f"engage_version:{t['name']}"
+            prev = self.store.get_meta(meta_key)
+            if prev and prev != cur:
+                age_h = _http_date_age_hours(lm, now)
+                if age_h is None or age_h <= self.cfg.version_recency_hours:
+                    weight = 1.0 if "prod" in (t.get("name") or "").lower() else 0.3
+                    changed.append({"app": t["name"], "version": ver, "last_modified": lm,
+                                    "previous": prev, "age_hours": age_h, "weight": weight})
+            self.store.set_meta(meta_key, cur)
+        if not changed:
+            return None
+        return SignalResult(
+            key="engage.version_change", role="cause", stream="clickonce",
+            query=",".join(t.get("name", "?") for t in targets),
+            count=len(changed), samples=changed, mode="presence",
+            note=f"Recent Engage publish (recency<={self.cfg.version_recency_hours}h; "
+                 f"Prod weighted 1.0 vs Test-Flight 0.3).",
+        )
+
+    # --- Seq-native detection (Engage errors past baseline) ---
+    def seq_error_filter(self) -> str:
+        app = self.catalog.get("seq", {}).get("app") or "Engage"
+        return f"App = '{app}' and (@Level = 'Error' or @Level = 'Warning')"
+
+    def seq_threshold(self, now: datetime) -> float:
+        tz = ZoneInfo(self.cfg.baseline_tz)
+        local = now.astimezone(tz)
+        row = self.store.get_seq_baseline(local.weekday(), local.hour)
+        if not row:
+            return float(self.cfg.seq_min_count)
+        sigma = 1.4826 * float(row["mad"] or 0.0)
+        return max(float(self.cfg.seq_min_count),
+                   float(row["median"] or 0.0) + self.cfg.seq_sigma * sigma)
+
+    def evaluate_seq(self, now: Optional[datetime] = None) -> List[int]:
+        now = now or utcnow()
+        if not (self.cfg.seq_detect_enabled and self.seq is not None):
+            return []
+        key = self.cfg.seq_alert_key
+        if self.store.in_cooldown(key, now):
+            return []
+        try:
+            count = self.seq.count(self.seq_error_filter(),
+                                   now - timedelta(minutes=self.cfg.seq_window_minutes), now)
+        except Exception as exc:
+            self.emit(f"[seq] count failed: {exc}")
+            return []
+        threshold = self.seq_threshold(now)
+        if count < threshold:
+            return []
+        evidence = self._corroborate(now, None, "app:engage")
+        alert_id = self.fire_seq_alert(now, count, threshold, evidence)
+        return [alert_id] if alert_id is not None else []
+
+    def fire_seq_alert(
+        self, now: datetime, count: int, threshold: float,
+        evidence: Optional[CorroborationResult],
+    ) -> Optional[int]:
+        key = self.cfg.seq_alert_key
+        if self.store.in_cooldown(key, now):
+            return None
+        note = self._compose_seq_note(now, count, threshold, evidence)
+        alert_id = self.store.record_alert(
+            key, None, now, count, now + timedelta(minutes=self.cfg.seq_cooldown_minutes),
+            evidence=_evidence_json(evidence),
+        )
+        # No ticket exists for a Seq-native alert -> no ticket note; Axle still gets
+        # the alert and posts the Teams card.
+        self.emit(f"[seq-alert] #{alert_id} key={key} count={count} threshold={threshold:.1f}")
+        try:
+            self.report_hook(alert_id, key, [], note)
+        except Exception as exc:
+            self.emit(f"[seq-alert] #{alert_id} report hook error: {exc}")
+        return alert_id
+
+    def _compose_seq_note(
+        self, now: datetime, count: int, threshold: float,
+        evidence: Optional[CorroborationResult],
+    ) -> str:
+        parts = [
+            "<p><b>[correlated-ticket monitor] Engage error-rate alert (Seq)</b></p>",
+            f"<p>Engage error/warning events in the last {self.cfg.seq_window_minutes} min: "
+            f"<b>{count}</b> (baseline threshold {threshold:.0f}). No ticket cluster is required.</p>",
+        ]
+        if evidence is not None:
+            parts.append(
+                f"<p><b>Corroborators</b> &mdash; {html.escape(evidence.confidence)}:</p><ul>"
+            )
+            for r in evidence.results:
+                unit = "event" if r.count == 1 else "events"
+                extra = f" (prior window {r.prior_count})" if r.role == "effect" else ""
+                flag = " *" if (r.role == "effect" and r.elevated) else ""
+                parts.append(
+                    f"<li>[{html.escape(r.role)}] <b>{html.escape(r.key)}</b> @ "
+                    f"{html.escape(r.stream)}: {r.count} {unit}{extra}{flag}</li>"
+                )
+            parts.append("</ul>")
+        parts.append("<p><i>Seq-native detection: Engage errors exceeded the 8-week baseline "
+                     "for this day/hour. Heuristic, not a confirmed incident.</i></p>")
+        return "".join(parts)
+
+    def run_seq_baseline(self, now: Optional[datetime] = None) -> tuple:
+        """Backfill the Engage error-rate baseline (~days of hourly counts) -> median+MAD."""
+
+        now = now or utcnow()
+        if self.seq is None:
+            return (0, 0)
+        tz = ZoneInfo(self.cfg.baseline_tz)
+        filt = self.seq_error_filter()
+        start = (now - timedelta(days=self.cfg.seq_baseline_days)).replace(
+            minute=0, second=0, microsecond=0)
+        buckets: Dict[tuple, List[float]] = defaultdict(list)
+        cur, n = start, 0
+        while cur < now:
+            nxt = cur + timedelta(hours=1)
+            try:
+                c = self.seq.count(filt, cur, nxt)
+            except Exception:
+                c = None
+            if c is not None:
+                loc = cur.astimezone(tz)
+                buckets[(loc.weekday(), loc.hour)].append(float(c))
+            cur, n = nxt, n + 1
+        rows = []
+        for (dow, hour), vals in buckets.items():
+            med = statistics.median(vals)
+            mad = statistics.median([abs(v - med) for v in vals])
+            rows.append((dow, hour, len(vals), med, mad))
+        self.store.replace_seq_baseline(rows, iso(now))
+        self.store.set_meta("seq_baseline_at", iso(now))
+        self.emit(f"[seq-baseline] {len(rows)} row(s) from {n} hour window(s)")
+        return len(rows), n
+
+    def maybe_run_seq_baseline(self, now: Optional[datetime] = None) -> None:
+        now = now or utcnow()
+        if not (self.cfg.seq_detect_enabled and self.seq is not None):
+            return
+        last = parse_dt(self.store.get_meta("seq_baseline_at"))
+        if last is not None and (now - last) < timedelta(hours=self.cfg.baseline_interval_hours):
+            return
+        try:
+            self.run_seq_baseline(now)
+        except Exception as exc:  # never break the loop
+            self.emit(f"[seq-baseline] error: {exc}")
+
     # --- note text ---
     def compose_note(
         self, key: str, tickets: Sequence[Ticket], now: datetime,
@@ -839,6 +1039,18 @@ def hook_reporter(url: str, token: str, timeout: int = 30):
 
 
 _POOL_HINT = re.compile(r"\b([A-Za-z]{2,}\d{1,2})-VDI-\d+", re.IGNORECASE)
+
+
+def _http_date_age_hours(lm: Optional[str], now: datetime) -> Optional[float]:
+    if not lm:
+        return None
+    try:
+        dt = parsedate_to_datetime(lm)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (now - dt.astimezone(timezone.utc)).total_seconds() / 3600.0
+    except Exception:
+        return None
 
 
 def _head_last_modified_and_version(url: str, timeout: int = 20):
@@ -1122,6 +1334,15 @@ def cmd_baseline(args: argparse.Namespace) -> int:
     monitor = _build_monitor(args)
     rows, tickets = monitor.run_baseline()
     print(f"baseline: {rows} row(s) from {tickets} ticket(s)")
+    return 0
+
+
+def cmd_seq_baseline(args: argparse.Namespace) -> int:
+    """Backfill the Engage error-rate (Seq) baseline, then exit."""
+
+    monitor = _build_monitor(args)
+    rows, windows = monitor.run_seq_baseline()
+    print(f"seq-baseline: {rows} row(s) from {windows} hour window(s)")
     return 0
 
 
