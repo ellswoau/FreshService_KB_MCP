@@ -275,9 +275,10 @@ class _FakeSeq:
     def count(self, filt, frm, to):
         return self.cur if to >= NOW else self.prior
 
-    def search(self, filt, frm, to, count=50):
-        return [{"@t": "2026-09-30T11:59:00Z", "@l": "Error", "MachineName": "BOS1-VDI-157",
-                 "UserId": "kvang", "@m": "Workflow failed"}]
+    def events(self, filt, count=100, from_dt=None, to_dt=None, render=True):
+        return [{"timestamp": "2026-09-30T11:59:00Z", "level": "Error",
+                 "MachineName": "BOS1-VDI-157", "UserId": "kvang",
+                 "SessionId": "s1", "CorrelationId": "c1", "message": "Workflow failed"}]
 
 
 def test_corroborate_seq_is_elevation_effect():

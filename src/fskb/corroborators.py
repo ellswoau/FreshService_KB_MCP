@@ -191,6 +191,20 @@ def _sample(entry: Dict[str, Any], signal: Dict[str, Any], catalog: Dict[str, An
 # --- Seq (Engage application logs) -----------------------------------------
 
 
+def _norm_seq(e: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a Seq event: built-ins + Properties[{Name,Value}] -> one dict."""
+
+    out: Dict[str, Any] = {
+        "timestamp": e.get("Timestamp"), "level": e.get("Level"),
+        "message": e.get("RenderedMessage"), "id": e.get("Id"),
+        "event_type": e.get("EventType"),
+    }
+    for p in e.get("Properties") or []:
+        if isinstance(p, dict) and p.get("Name"):
+            out[p["Name"]] = p.get("Value")
+    return out
+
+
 class SeqClient:
     """Minimal Seq client (Seq 2025.x). Auth: ``X-Seq-ApiKey``.
 
@@ -216,36 +230,29 @@ class SeqClient:
         c.verify_mode = ssl.CERT_NONE
         return c
 
-    def search(self, filter_expr: str, from_dt: datetime, to_dt: datetime, count: int = 50):
-        params = urllib.parse.urlencode({
-            "filter": filter_expr, "count": count,
-            "fromDateUtc": _gl_ts(from_dt), "toDateUtc": _gl_ts(to_dt),
-        })
-        req = urllib.request.Request(f"{self.url}/api/events?{params}", headers=self._headers())
+    def events(self, filter_expr: str = "", count: int = 100,
+               from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None,
+               render: bool = True) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"count": max(1, min(int(count), 1000))}
+        if render:
+            params["render"] = "true"
+        if filter_expr:
+            params["filter"] = filter_expr
+        if from_dt:
+            params["fromDateUtc"] = _gl_ts(from_dt)
+        if to_dt:
+            params["toDateUtc"] = _gl_ts(to_dt)
+        req = urllib.request.Request(
+            f"{self.url}/api/events?{urllib.parse.urlencode(params)}", headers=self._headers()
+        )
         with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx()) as r:
-            return json.load(r)
+            data = json.load(r)
+        return [_norm_seq(e) for e in (data if isinstance(data, list) else [])]
 
     def count(self, filter_expr: str, from_dt: datetime, to_dt: datetime) -> int:
-        params = urllib.parse.urlencode({
-            "filter": filter_expr, "fromDateUtc": _gl_ts(from_dt), "toDateUtc": _gl_ts(to_dt),
-        })
-        try:
-            req = urllib.request.Request(
-                f"{self.url}/api/events/signal?{params}", headers=self._headers()
-            )
-            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx()) as r:
-                data = json.load(r)
-            if isinstance(data, dict):
-                if "Count" in data:
-                    return int(data["Count"])
-                if "Slices" in data:
-                    return sum(int(s.get("Count", 0)) for s in data["Slices"])
-        except Exception:
-            pass
-        try:
-            return len(self.search(filter_expr, from_dt, to_dt, count=1000) or [])
-        except Exception:
-            return 0
+        # Seq's SQL API (a count source) needs more than a read key (403); count via
+        # events, capped at Seq's 1000-event page limit.
+        return len(self.events(filter_expr, count=1000, from_dt=from_dt, to_dt=to_dt, render=False))
 
 
 def corroborate_seq(
@@ -274,12 +281,12 @@ def corroborate_seq(
     prior = seq_client.count(filt, frm, window_start)
     samples: List[Dict[str, Any]] = []
     try:
-        for e in (seq_client.search(filt, window_start, window_end, count=limit) or [])[:limit]:
+        for e in (seq_client.events(filt, count=limit,
+                                    from_dt=window_start, to_dt=window_end) or [])[:limit]:
             samples.append({
-                "at": e.get("@t") or e.get("Timestamp"),
-                "level": e.get("@l") or e.get("Level"),
+                "at": e.get("timestamp"), "level": e.get("level"),
                 "machine": e.get("MachineName"), "user": e.get("UserId"),
-                "text": (e.get("@m") or e.get("Message") or "")[:120],
+                "text": (e.get("message") or "")[:120],
             })
     except Exception:
         pass
