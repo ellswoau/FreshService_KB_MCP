@@ -100,5 +100,40 @@
     "correlation_field": "CorrelationId",
     "user_field": "UserId",
     "machine_field": "MachineName"
+  },
+  "datadog": {
+    "note": "Infra plane (metrics). Documented for the corroborators skill; the automated monitor's Datadog handler is PENDING (this key is not yet iterated by corroborate()). Reached via litellm__Datadog_MCP-* / the datadog skill. Judge by elevation vs the prior window, never presence. Snapshot with graph_snapshot() and attach the returned path via FreshService add_private_note(attachments=[path]).",
+    "tool": "litellm__Datadog_MCP-metric_elevation",
+    "site": "datadoghq.com",
+    "planes": {
+      "asgard_sql": {
+        "scope": "host:asgard",
+        "use_when": "Engage slowness/freezing or report timeouts",
+        "role": "effect",
+        "signals": [
+          "avg:sqlserver.stats.lock_waits{host:asgard}",
+          "avg:sqlserver.stats.procs_blocked{host:asgard}",
+          "avg:sqlserver.locks.deadlocks{host:asgard}",
+          "avg:sqlserver.activity.waits{host:asgard} by {wait_event}",
+          "avg:sqlserver.queries.time{host:asgard}",
+          "avg:sqlserver.files.read_io_stall{host:asgard}",
+          "avg:sqlserver.files.write_io_stall{host:asgard}",
+          "avg:sqlserver.buffer.page_life_expectancy{host:asgard}"
+        ]
+      },
+      "vsphere": {
+        "use_when": "slow/frozen VDI desktops or hot app hosts",
+        "role": "effect",
+        "vdi_scope": "vsphere_type:host, vcenter_server:*horizon*",
+        "apps_scope": "vsphere_type:host, vsphere_cluster:gr-ac1",
+        "signals": [
+          "avg:vsphere.mem.usage.avg{vsphere_type:host} by {host}",
+          "avg:vsphere.cpu.usage.avg{vsphere_type:host} by {host}",
+          "avg:vsphere.cpu.latency.avg{vsphere_type:host, vcenter_server:*horizon*} by {host}",
+          "avg:vsphere.cpu.latency.avg{vsphere_type:host, vsphere_cluster:gr-ac1} by {host}"
+        ],
+        "thresholds": {"memory_pct": 85}
+      }
+    }
   }
 }
