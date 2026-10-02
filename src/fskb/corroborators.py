@@ -579,8 +579,8 @@ def corroborate_saas_status(catalog: Dict[str, Any], timeout: int = 20) -> Signa
 _DATADOG_SQL_SIGNALS = [
     ("sql.lock_waits", "avg:sqlserver.stats.lock_waits{host:asgard}", None,
      "Asgard SQL lock waits (production DB behind Engage)."),
-    ("sql.procs_blocked", "avg:sqlserver.stats.procs_blocked{host:asgard}", 0.0,
-     "Asgard SQL blocked processes (normally 0)."),
+    ("sql.procs_blocked", "avg:sqlserver.stats.procs_blocked{host:asgard}", None,
+     "Asgard SQL blocked processes (elevation vs the prior window)."),
     ("sql.query_time", "avg:sqlserver.queries.time{host:asgard}.as_rate()", None,
      "Asgard SQL query time rate (latency)."),
 ]
