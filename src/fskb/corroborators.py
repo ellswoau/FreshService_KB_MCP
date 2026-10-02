@@ -108,6 +108,9 @@ class SignalResult:
     samples: List[Dict[str, Any]] = field(default_factory=list)
     note: str = ""
     mode: str = "presence"  # "presence" (low base rate) | "elevation" (high volume)
+    # A metric whose threshold was explicitly exceeded corroborates regardless of
+    # the count-vs-prior rule below (used by the Datadog infra signals).
+    threshold_hit: bool = False
 
     @property
     def elevated(self) -> bool:
@@ -116,9 +119,11 @@ class SignalResult:
         ``presence``: any hit matters (a low-base-rate cause, or a pool sitting
         in an ERROR state when it is normally 0). ``elevation``: a high-volume
         effect is noise on presence alone, so require a rise vs its own prior
-        equal window.
+        equal window. ``threshold_hit``: an explicit metric threshold was crossed.
         """
 
+        if self.threshold_hit:
+            return True
         if self.mode == "presence":
             return self.count > 0
         return self.count >= 3 and self.count >= max(3, 2 * self.prior_count)
@@ -568,6 +573,78 @@ def corroborate_saas_status(catalog: Dict[str, Any], timeout: int = 20) -> Signa
     )
 
 
+# --- Datadog (infrastructure metrics) --------------------------------------
+
+# Effect signals per cluster flavour: (key, metric query, threshold, note).
+_DATADOG_SQL_SIGNALS = [
+    ("sql.lock_waits", "avg:sqlserver.stats.lock_waits{host:asgard}", None,
+     "Asgard SQL lock waits (production DB behind Engage)."),
+    ("sql.procs_blocked", "avg:sqlserver.stats.procs_blocked{host:asgard}", 0.0,
+     "Asgard SQL blocked processes (normally 0)."),
+    ("sql.query_time", "avg:sqlserver.queries.time{host:asgard}.as_rate()", None,
+     "Asgard SQL query time rate (latency)."),
+]
+_DATADOG_VDI_SIGNALS = [
+    ("vdi.host_mem", "avg:vsphere.mem.usage.avg{vsphere_type:host} by {host}", 85.0,
+     "VDI/app host memory % (threshold >85)."),
+    ("vdi.cpu_latency",
+     "avg:vsphere.cpu.latency.avg{vsphere_type:host, vcenter_server:*horizon*} by {host}",
+     None, "VDI host CPU latency (vSphere CPU ready)."),
+]
+_ENGAGE_WORDS = ("engage", "sql", "database", "report", "invoice", "statement", "freez", "slow")
+_VDI_WORDS = ("vdi", "horizon", "desktop", "weller cloud", "black screen", "fslogix", "session", "clone")
+
+
+def corroborate_datadog(
+    datadog_client: MCPClient,
+    window_start: datetime,
+    window_end: datetime,
+    keywords: Optional[List[str]] = None,
+    limit: int = 3,
+) -> List[SignalResult]:
+    """Infra metrics from Datadog = an EFFECT source (elevation vs prior window).
+
+    Picks the Asgard SQL signals for an Engage-flavoured cluster and the vSphere
+    host signals for a VDI-flavoured one (one of each by default), then asks the
+    Datadog MCP for ``metric_elevation`` on each. A metric whose threshold was
+    crossed corroborates on its own; otherwise the count/prior rule applies.
+    """
+
+    blob = " ".join(keywords or []).lower()
+    picks: List[tuple] = []
+    if any(w in blob for w in _ENGAGE_WORDS):
+        picks += _DATADOG_SQL_SIGNALS
+    if any(w in blob for w in _VDI_WORDS):
+        picks += _DATADOG_VDI_SIGNALS
+    if not picks:
+        picks = [_DATADOG_SQL_SIGNALS[0], _DATADOG_VDI_SIGNALS[0]]
+    span_hours = max(1.0, (window_end - window_start).total_seconds() / 3600.0)
+
+    out: List[SignalResult] = []
+    for key, query, threshold, note in picks[:limit]:
+        args: Dict[str, Any] = {"query": query, "hours": round(span_hours, 2)}
+        if threshold is not None:
+            args["threshold"] = threshold
+        try:
+            res = datadog_client.call_tool("metric_elevation", args)
+        except Exception as exc:  # evidence is best-effort
+            out.append(SignalResult(key=f"datadog.{key}", role="effect", stream="datadog",
+                                    query=query, count=0, mode="elevation",
+                                    note=f"unavailable: {exc}"))
+            continue
+        data = res.get("data", {}) if isinstance(res, dict) else {}
+        cur = (data.get("current") or {}).get("peak")
+        base = (data.get("baseline") or {}).get("peak")
+        out.append(SignalResult(
+            key=f"datadog.{key}", role="effect", stream="datadog", query=query,
+            count=int(round(cur)) if cur is not None else 0,
+            prior_count=int(round(base)) if base is not None else 0,
+            mode="elevation", threshold_hit=bool(data.get("exceeded")),
+            note=f"{note} current_peak={cur} baseline_peak={base} ratio={data.get('ratio')}",
+        ))
+    return out
+
+
 def corroborate(
     client: GraylogClient,
     catalog: Dict[str, Any],
@@ -585,6 +662,7 @@ def corroborate(
     saas_timeout: int = 20,
     seq_client: Any = None,
     seq_app: str = "Engage",
+    datadog_client: Optional[MCPClient] = None,
 ) -> CorroborationResult:
     """Run every catalog signal for a cluster window and score the evidence.
 
@@ -668,6 +746,17 @@ def corroborate(
             results.append(
                 SignalResult(key="engage.log_errors", role="effect", stream="seq",
                              query="seq", count=0, mode="elevation", note=f"unavailable: {exc}")
+            )
+
+    if datadog_client is not None:
+        try:
+            results.extend(corroborate_datadog(datadog_client, window_start, window_end,
+                                               keywords=keywords))
+        except Exception as exc:  # evidence is best-effort
+            results.append(
+                SignalResult(key="datadog.metrics", role="effect", stream="datadog",
+                             query="metric_elevation", count=0, mode="elevation",
+                             note=f"unavailable: {exc}")
             )
 
     cause_hit = any(r.role == "cause" and r.elevated for r in results)

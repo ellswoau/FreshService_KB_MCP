@@ -127,6 +127,12 @@ class Settings:
     horizon_mcp_verify_ssl: bool = True
     monitor_horizon_enabled: bool = True
 
+    # Corroborators via Datadog (infra metrics: Asgard SQL Server + vSphere hosts)
+    datadog_mcp_url: Optional[str] = None
+    datadog_mcp_auth_token: Optional[str] = None
+    datadog_mcp_verify_ssl: bool = True
+    monitor_datadog_enabled: bool = True
+
     # Change feed (FreshService changes) as a cause corroborator
     monitor_change_enabled: bool = True
     monitor_change_lookback_hours: int = 72
@@ -207,6 +213,10 @@ class Settings:
             horizon_mcp_auth_token=_env("HORIZON_MCP_AUTH_TOKEN"),
             horizon_mcp_verify_ssl=_env_bool("HORIZON_MCP_VERIFY_SSL", True),
             monitor_horizon_enabled=_env_bool("MONITOR_HORIZON_ENABLED", True),
+            datadog_mcp_url=(_env("DATADOG_MCP_URL") or "").rstrip("/") or None,
+            datadog_mcp_auth_token=_env("DATADOG_MCP_AUTH_TOKEN"),
+            datadog_mcp_verify_ssl=_env_bool("DATADOG_MCP_VERIFY_SSL", True),
+            monitor_datadog_enabled=_env_bool("MONITOR_DATADOG_ENABLED", True),
             monitor_change_enabled=_env_bool("MONITOR_CHANGE_ENABLED", True),
             monitor_change_lookback_hours=_env_int("MONITOR_CHANGE_LOOKBACK_HOURS", 72),
             freshservice_mcp_url=(_env("FRESHSERVICE_MCP_URL") or "").rstrip("/") or None,

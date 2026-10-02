@@ -299,3 +299,79 @@ def test_saas_status_counts_non_up_vendors(monkeypatch):
     sig = C.corroborate_saas_status(cat)
     assert sig.count == 1
     assert {s["vendor"] for s in sig.samples if s["status"] != "up"} == {"Cloudflare"}
+
+
+# --- Datadog (infrastructure metrics) -------------------------------------
+class _FakeDatadog:
+    """Maps a metric_elevation call (by query substring) to a canned result."""
+
+    def __init__(self, responses=None):
+        self.responses = responses or {}
+        self.calls = []
+
+    def call_tool(self, name, arguments=None):
+        assert name == "metric_elevation"
+        self.calls.append(arguments or {})
+        q = (arguments or {}).get("query") or ""
+        for key, val in self.responses.items():
+            if key in q:
+                return val
+        return {"data": {"current": {"peak": 0}, "baseline": {"peak": 0},
+                         "ratio": None, "exceeded": False}}
+
+
+def test_datadog_engage_cluster_picks_sql_signals():
+    dd = _FakeDatadog({
+        "lock_waits": {"data": {"current": {"peak": 6}, "baseline": {"peak": 1},
+                                "ratio": 6.0, "exceeded": False}},
+        "procs_blocked": {"data": {"current": {"peak": 0}, "baseline": {"peak": 0},
+                                   "ratio": None, "exceeded": False}},
+        "queries.time": {"data": {"current": {"peak": 10}, "baseline": {"peak": 9},
+                                  "ratio": 1.1, "exceeded": False}},
+    })
+    res = C.corroborate_datadog(dd, NOW - timedelta(minutes=60), NOW,
+                                keywords=["engage", "slow", "freezing"])
+    keys = [r.key for r in res]
+    assert "datadog.sql.lock_waits" in keys
+    assert all(r.role == "effect" and r.stream == "datadog" for r in res)
+    lock = [r for r in res if r.key == "datadog.sql.lock_waits"][0]
+    assert lock.count == 6 and lock.prior_count == 1 and lock.elevated is True
+
+
+def test_datadog_defaults_to_one_sql_and_one_vdi():
+    res = C.corroborate_datadog(_FakeDatadog(), NOW - timedelta(minutes=60), NOW,
+                                keywords=["a completely unrelated topic"])
+    keys = {r.key for r in res}
+    assert "datadog.sql.lock_waits" in keys and "datadog.vdi.host_mem" in keys
+
+
+def test_datadog_threshold_hit_marks_elevated():
+    dd = _FakeDatadog({"mem.usage": {"data": {"current": {"peak": 92}, "baseline": {"peak": 91},
+                                              "ratio": 1.0, "exceeded": True}}})
+    res = C.corroborate_datadog(dd, NOW - timedelta(minutes=60), NOW,
+                                keywords=["vdi", "black screen"])
+    mem = [r for r in res if r.key == "datadog.vdi.host_mem"][0]
+    assert mem.threshold_hit is True and mem.elevated is True
+    assert any(c.get("threshold") == 85.0 for c in dd.calls)
+
+
+def test_datadog_unavailable_is_not_fatal():
+    class _Boom:
+        def call_tool(self, name, arguments=None):
+            raise RuntimeError("mcp down")
+
+    res = C.corroborate_datadog(_Boom(), NOW - timedelta(minutes=60), NOW, keywords=["engage"])
+    assert res and all("unavailable" in r.note for r in res)
+
+
+def test_corroborate_includes_datadog_when_client_present():
+    dd = _FakeDatadog({
+        "lock_waits": {"data": {"current": {"peak": 9}, "baseline": {"peak": 1},
+                                "ratio": 9.0, "exceeded": False}},
+    })
+    res = C.corroborate(_FakeGraylog(cause=0, effect=0), C.load_catalog(),
+                        NOW - timedelta(minutes=60), NOW, datadog_client=dd,
+                        keywords=["engage", "slow"])
+    sig = [r for r in res.results if r.key == "datadog.sql.lock_waits"][0]
+    assert sig.elevated is True
+    assert res.confidence == C.CONF_CONSISTENT

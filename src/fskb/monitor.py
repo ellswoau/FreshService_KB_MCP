@@ -378,6 +378,10 @@ class MonitorConfig:
     horizon_mcp_url: Optional[str] = None
     horizon_mcp_auth_token: Optional[str] = None
     horizon_mcp_verify_ssl: bool = True
+    datadog_enabled: bool = True
+    datadog_mcp_url: Optional[str] = None
+    datadog_mcp_auth_token: Optional[str] = None
+    datadog_mcp_verify_ssl: bool = True
     change_enabled: bool = True
     change_lookback_hours: int = 72
     saas_enabled: bool = True
@@ -425,6 +429,10 @@ class MonitorConfig:
             horizon_mcp_url=settings.horizon_mcp_url,
             horizon_mcp_auth_token=settings.horizon_mcp_auth_token,
             horizon_mcp_verify_ssl=settings.horizon_mcp_verify_ssl,
+            datadog_enabled=settings.monitor_datadog_enabled,
+            datadog_mcp_url=settings.datadog_mcp_url,
+            datadog_mcp_auth_token=settings.datadog_mcp_auth_token,
+            datadog_mcp_verify_ssl=settings.datadog_mcp_verify_ssl,
             change_enabled=settings.monitor_change_enabled,
             change_lookback_hours=settings.monitor_change_lookback_hours,
             saas_enabled=settings.monitor_saas_enabled,
@@ -471,6 +479,12 @@ class CorrelatedMonitor:
         if config.horizon_enabled and config.horizon_mcp_url and config.horizon_mcp_auth_token:
             self.horizon_mcp = MCPClient(
                 config.horizon_mcp_url, config.horizon_mcp_auth_token, config.horizon_mcp_verify_ssl
+            )
+        # Datadog infra metrics (Asgard SQL + vSphere) - only when configured.
+        self.datadog: Optional[MCPClient] = None
+        if config.datadog_enabled and config.datadog_mcp_url and config.datadog_mcp_auth_token:
+            self.datadog = MCPClient(
+                config.datadog_mcp_url, config.datadog_mcp_auth_token, config.datadog_mcp_verify_ssl
             )
         # Seq (Engage application logs) - only when URL + key are configured.
         self.seq: Optional[SeqClient] = None
@@ -657,6 +671,7 @@ class CorrelatedMonitor:
                 keywords=_cluster_keywords(key, tickets),
                 check_saas=self.cfg.saas_enabled,
                 seq_client=self.seq,
+                datadog_client=self.datadog,
             )
             if self.cfg.engage_version_enabled:
                 vs = self._engage_version_signal(now, key)
