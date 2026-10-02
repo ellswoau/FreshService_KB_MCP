@@ -102,7 +102,7 @@
     "machine_field": "MachineName"
   },
   "datadog": {
-    "note": "Infra plane (metrics). Documented for the corroborators skill; the automated monitor's Datadog handler is PENDING (this key is not yet iterated by corroborate()). Reached via litellm__Datadog_MCP-* / the datadog skill. Judge by elevation vs the prior window, never presence. Snapshot with graph_snapshot() and attach the returned path via FreshService add_private_note(attachments=[path]).",
+    "note": "Infra plane (metrics). Documented for the corroborators skill AND run by the automated monitor via corroborate_datadog() (asgard_sql for Engage-flavoured clusters, vsphere for VDI-flavoured). Reached via litellm__Datadog_MCP-* / the datadog skill; the monitor calls the Datadog MCP directly. Judge by elevation vs the prior window, never presence. Snapshot with graph_snapshot() and attach the returned path via FreshService add_private_note(attachments=[path]).",
     "tool": "litellm__Datadog_MCP-metric_elevation",
     "site": "datadoghq.com",
     "planes": {
